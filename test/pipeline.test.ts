@@ -40,6 +40,8 @@ class FakeAds implements AdsPort {
   currency = 'INR';
   next = 100;
   created = new Map<string, Record<string, any>>(); // campaign resource name -> resource
+  adGroups: { id: string; name: string; campaign: string }[] = [];
+  children: { entity: string; adGroup: string }[] = [];
   async mutate(operations: Operation[], options?: { validateOnly?: boolean }) {
     // Every operation must be a valid Google Ads API message (same conversion the library does).
     for (const op of operations) {
@@ -59,9 +61,14 @@ class FakeAds implements AdsPort {
       const r = op.resource as Record<string, any>;
       if (op.operation !== 'create') return typeof op.resource === 'string' ? op.resource : r.resource_name;
       const id = String(this.next++);
-      if (op.entity === 'ad_group_ad') return `customers/1/adGroupAds/${(temp.get(r.ad_group) ?? '').split('/').pop()}~${id}`;
+      if (op.entity === 'ad_group_ad') {
+        this.children.push({ entity: op.entity, adGroup: temp.get(r.ad_group) ?? r.ad_group });
+        return `customers/1/adGroupAds/${(temp.get(r.ad_group) ?? r.ad_group).split('/').pop()}~${id}`;
+      }
       const real = `customers/1/${op.entity}s/${id}`;
       if (r.resource_name) temp.set(r.resource_name, real);
+      if (op.entity === 'ad_group') this.adGroups.push({ id, name: r.name, campaign: temp.get(r.campaign) ?? r.campaign });
+      if (op.entity === 'ad_group_ad' || op.entity === 'ad_group_criterion') this.children.push({ entity: op.entity, adGroup: temp.get(r.ad_group) ?? r.ad_group });
       if (op.entity === 'campaign') this.created.set(real, r);
       return real;
     });
@@ -80,6 +87,10 @@ class FakeAds implements AdsPort {
     }
     if (gaql.includes('campaign.name LIKE') && gaql.startsWith('SELECT campaign.id, campaign.name')) return this.existing.map((c) => ({ campaign: c }));
     if (gaql.includes('FROM ad_group_ad WHERE campaign.id')) return [];
+    if (gaql.includes('FROM ad_group WHERE campaign.id')) {
+      const campaignId = gaql.match(/campaign\.id = (\d+)/)![1];
+      return this.adGroups.filter((g) => g.campaign.endsWith(`/${campaignId}`)).map((g) => ({ ad_group: { id: g.id, name: g.name } }));
+    }
     if (gaql.includes('campaign.serving_status')) return [];
     if (gaql.includes('policy_summary')) return [];
     return [];
@@ -344,4 +355,49 @@ test('preflight stops on a non-INR account', async () => {
   assert.equal(db.get('preflight'), 'failed');
   assert.match(db.get('preflight_notes') ?? '', /INR/);
   assert.ok(!ads.calls.some((c) => !c.validateOnly && c.operations.some((o) => o.entity === 'ad_group_ad')));
+});
+
+test('JSON in a code fence or with text around it is read', () => {
+  const json = JSON.stringify({ headlines: H, descriptions: D });
+  assert.equal(parseAdCopy('```json\n' + json + '\n```')?.headlines.length, 15);
+  assert.equal(parseAdCopy('Here is the ad copy:\n' + json + '\nHope this helps.')?.descriptions.length, 4);
+  assert.equal(parseAdCopy('{"headlines": ["a"'), undefined);
+});
+
+test('unreadable copy: retried after the fix and added to the already-uploaded campaign', async () => {
+  const { deps, sheet, batches, ads, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  sheet.setting('Upload pilot', 'TRUE');
+  // Every second pilot article gets an answer that isn't JSON (as happened on 10 Nov 2026).
+  batches.answer = (req) => {
+    const idx = Number(req.custom_id.slice(1));
+    if (idx % 2 === 1) return { custom_id: req.custom_id, type: 'succeeded', text: 'Sorry, here you go: headlines...', stopReason: 'end_turn' };
+    return { custom_id: req.custom_id, type: 'succeeded', text: JSON.stringify({ headlines: H, descriptions: D }) };
+  };
+  for (let i = 0; i < 5; i++) await tick(deps);
+  const pilot = db.allArticles().filter((a) => a.wave === 'pilot');
+  const missing = pilot.filter((a) => a.ad_status === 'skipped');
+  assert.ok(missing.length > 0);
+  assert.match(db.article(missing[0].url)!.copy_error ?? '', /not valid JSON \(stop_reason end_turn\): Sorry, here you go/);
+  assert.ok(db.campaigns('pilot').every((c) => c.status === 'uploaded'));
+  const adGroupsBefore = ads.adGroups.length;
+
+  // The fix: the worker restarts, resets those articles, and Haiku's answers are now readable.
+  assert.equal(db.resetUnreadableCopy(), missing.length);
+  batches.answer = (req) => ({ custom_id: req.custom_id, type: 'succeeded', text: '```json\n' + JSON.stringify({ headlines: H, descriptions: D }) + '\n```' });
+  for (let i = 0; i < 3; i++) await tick(deps);
+
+  const after = db.allArticles().filter((a) => a.wave === 'pilot');
+  assert.ok(after.every((a) => a.ad_status === 'uploaded' && a.ad_id), JSON.stringify(after.filter((a) => a.ad_status !== 'uploaded').map((a) => [a.url, a.ad_status, a.error])));
+  // No campaign created twice: still one campaign per pilot campaign (+ the removed preflight test).
+  const created = [...ads.created.values()].map((c) => c.name).filter((n) => n.startsWith('Ponly Faith'));
+  assert.equal(created.length, db.campaigns('pilot').length);
+  // Ad groups that already existed were reused, not created again: names stay unique per campaign.
+  const keys = ads.adGroups.map((g) => `${g.campaign}|${g.name}`);
+  assert.equal(new Set(keys).size, keys.length);
+  assert.ok(ads.adGroups.length >= adGroupsBefore);
+  // Every ad group has at most 3 ads.
+  const perGroup = new Map<string, number>();
+  for (const c of ads.children.filter((x) => x.entity === 'ad_group_ad')) perGroup.set(c.adGroup, (perGroup.get(c.adGroup) ?? 0) + 1);
+  assert.ok([...perGroup.values()].every((n) => n <= 3), JSON.stringify([...perGroup.entries()]));
 });

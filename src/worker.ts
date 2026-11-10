@@ -5,7 +5,7 @@ import { log } from './log.ts';
 import { googleSheet, parseSettings, parseInput, type SheetPort, type Settings } from './sheet.ts';
 import { anthropicBatchClient, submitCopyBatch, collectCopyBatches, type BatchClient } from './copy.ts';
 import { googleAdsPort, type AdsPort } from './ads.ts';
-import { ensureLabel, preflight, existingCampaigns, uploadCampaign, enableWave, sync, QuotaReached } from './upload.ts';
+import { ensureLabel, preflight, existingCampaigns, uploadCampaign, topUpCampaign, enableWave, sync, QuotaReached } from './upload.ts';
 import { writeReports } from './report.ts';
 import { WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
 
@@ -124,6 +124,13 @@ async function uploadWaves(db: Db, ads: AdsPort, settings: Settings, cap: number
       db.set('sync_requested', '1');
     }
   }
+  // Ads whose copy came after their campaign was uploaded go into the existing campaign.
+  for (const wave of wavesOn) {
+    for (const campaign of db.campaignsToTopUp(wave)) {
+      await topUpCampaign(db, ads, settings.account, cap, campaign.name);
+      db.set('sync_requested', '1');
+    }
+  }
 }
 
 async function enableWaves(db: Db, ads: AdsPort, settings: Settings, cap: number): Promise<void> {
@@ -156,6 +163,12 @@ async function main(): Promise<void> {
   const db = new Db(join(dataDir, 'rsa.sqlite'));
   // A failed preflight is tried again after a restart.
   if (db.get('preflight') === 'failed') db.set('preflight', '');
+  // One-time (10 Nov 2026): copy that failed only because the answer wasn't read as JSON gets 3 new tries.
+  if (db.get('reset_unreadable_copy_v1') !== 'done') {
+    const reset = db.resetUnreadableCopy();
+    db.set('reset_unreadable_copy_v1', 'done');
+    log(`ad copy: ${reset} articles whose answers couldn't be read get 3 new tries`);
+  }
   const sheet = googleSheet(env.SHEET_ID, env.GOOGLE_SERVICE_ACCOUNT_JSON);
   await sheet.ensureTabs();
   const adsPorts = new Map<string, AdsPort>();

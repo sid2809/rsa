@@ -50,7 +50,7 @@ export const MAX_DESCRIPTION_LENGTH = 90;
 // Ad copy: Claude Haiku 5.5 through the Message Batches API
 export const MODEL = 'claude-haiku-5-5';
 export const COPY_MAX_ATTEMPTS = 3; // per article; after that the article is left out and listed as failed
-export const COPY_MAX_TOKENS = 2000;
+export const COPY_MAX_TOKENS = 4000;
 
 // Uploads
 export const UPLOAD_MAX_ATTEMPTS = 3; // per campaign

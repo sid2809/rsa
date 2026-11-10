@@ -71,13 +71,23 @@ export function isUsable(copy: AdCopy): boolean {
   return copy.headlines.length >= MIN_HEADLINES_REQUIRED && copy.descriptions.length >= MIN_DESCRIPTIONS_REQUIRED;
 }
 
-// Parses Claude's JSON answer. Returns undefined if it isn't the expected shape.
+// Parses Claude's JSON answer: plain JSON, JSON in a ```json fence, or the first {...} in the text.
+// Returns undefined if no candidate is the expected shape.
 export function parseAdCopy(text: string): AdCopy | undefined {
-  try {
-    const value = JSON.parse(text) as Partial<AdCopy>;
-    if (!value || typeof value !== 'object') return undefined;
-    return cleanAdCopy({ headlines: value.headlines as string[], descriptions: value.descriptions as string[] });
-  } catch {
-    return undefined;
+  const candidates = [text.trim()];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1].trim());
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) candidates.push(text.slice(start, end + 1));
+  for (const candidate of candidates) {
+    try {
+      const value = JSON.parse(candidate) as Partial<AdCopy>;
+      if (!value || typeof value !== 'object' || !Array.isArray(value.headlines) || !Array.isArray(value.descriptions)) continue;
+      return cleanAdCopy({ headlines: value.headlines as string[], descriptions: value.descriptions as string[] });
+    } catch {
+      // try the next candidate
+    }
   }
+  return undefined;
 }

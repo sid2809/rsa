@@ -250,6 +250,43 @@ export class Db {
     }
   }
 
+  // One-time: articles whose copy failed only because the answer couldn't be read as JSON
+  // (fixed 10 Nov 2026) get 3 new tries. Returns how many were reset.
+  resetUnreadableCopy(): number {
+    const result = this.sql
+      .prepare(
+        `UPDATE articles SET copy_status = 'pending', copy_attempts = 0, batch_id = NULL, copy_error = NULL
+         WHERE copy_status = 'failed' AND copy_error LIKE 'answer was not valid JSON%'`,
+      )
+      .run();
+    return Number(result.changes);
+  }
+
+  // Uploaded campaigns that have articles with copy now but no ad yet (their copy came after the upload).
+  campaignsToTopUp(wave: Wave): CampaignRow[] {
+    return this.sql
+      .prepare(
+        `SELECT c.* FROM campaigns c WHERE c.wave = ? AND c.status = 'uploaded' AND c.campaign_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM articles a WHERE a.campaign = c.name AND a.ad_status = 'skipped' AND a.copy_status = 'done')
+         ORDER BY (SELECT MIN(row_index) FROM articles a WHERE a.campaign = c.name)`,
+      )
+      .all(wave) as unknown as CampaignRow[];
+  }
+
+  markAdsAdded(ads: { url: string; adGroupId: string; adId: string }[], leftOut: { url: string; error: string }[]): void {
+    this.sql.exec('BEGIN');
+    try {
+      const up = this.sql.prepare("UPDATE articles SET ad_status = 'uploaded', ad_group_id = ?, ad_id = ?, error = NULL WHERE url = ?");
+      for (const ad of ads) up.run(ad.adGroupId, ad.adId, ad.url);
+      const out = this.sql.prepare("UPDATE articles SET ad_status = 'error', error = ? WHERE url = ?");
+      for (const item of leftOut) out.run(item.error, item.url);
+      this.sql.exec('COMMIT');
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   markCampaignAttemptFailed(name: string, error: string, maxAttempts: number): void {
     const row = this.campaign(name);
     if (!row) return;

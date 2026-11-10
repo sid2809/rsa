@@ -191,18 +191,29 @@ export function campaignOperations(customerId: string, campaignName: string, ads
   );
   add({ entity: 'campaign_label', operation: 'create', resource: { campaign, label: labelResourceName } }, { kind: 'campaign' });
 
+  appendAdGroups(cid, campaign, ads, new Map(), add);
+  return { operations, roles };
+}
+
+// Ad groups, keywords and ads. An ad group already in Google Ads (by name, from `existing`) is reused;
+// the others are created with temporary IDs.
+function appendAdGroups(cid: string, campaign: string, ads: Ad[], existing: Map<string, string>, add: (op: Operation, role: OpRole) => void): void {
   const adGroupNames = [...new Set(ads.map((ad) => ad.adGroup))];
-  adGroupNames.forEach((adGroupName, i) => {
-    const adGroup = `customers/${cid}/adGroups/-${i + 3}`;
+  let temp = 3;
+  for (const adGroupName of adGroupNames) {
+    const existingId = existing.get(adGroupName);
+    const adGroup = existingId ? `customers/${cid}/adGroups/${existingId}` : `customers/${cid}/adGroups/-${temp++}`;
     const groupAds = ads.filter((ad) => ad.adGroup === adGroupName);
-    add(
-      {
-        entity: 'ad_group',
-        operation: 'create',
-        resource: { resource_name: adGroup, campaign, name: adGroupName, status: enums.AdGroupStatus.ENABLED, type: enums.AdGroupType.SEARCH_STANDARD },
-      },
-      { kind: 'ad_group', adGroup: adGroupName },
-    );
+    if (!existingId) {
+      add(
+        {
+          entity: 'ad_group',
+          operation: 'create',
+          resource: { resource_name: adGroup, campaign, name: adGroupName, status: enums.AdGroupStatus.ENABLED, type: enums.AdGroupType.SEARCH_STANDARD },
+        },
+        { kind: 'ad_group', adGroup: adGroupName },
+      );
+    }
     // One keyword per article; the same keyword twice in one ad group is added once (as in the repo).
     const byKeyword = new Map<string, string[]>();
     for (const ad of groupAds) {
@@ -239,6 +250,17 @@ export function campaignOperations(customerId: string, campaignName: string, ads
         { kind: 'ad', adGroup: adGroupName, url: ad.url },
       );
     }
+  }
+}
+
+// Adds ads (and their keywords, and any missing ad groups) to a campaign that already exists in Google Ads.
+export function topUpOperations(customerId: string, campaignId: string, ads: Ad[], existingAdGroups: Map<string, string>): CampaignPlan {
+  const cid = cleanCustomerId(customerId);
+  const operations: Operation[] = [];
+  const roles: OpRole[] = [];
+  appendAdGroups(cid, `customers/${cid}/campaigns/${campaignId}`, ads, existingAdGroups, (op, role) => {
+    operations.push(op);
+    roles.push(role);
   });
   return { operations, roles };
 }

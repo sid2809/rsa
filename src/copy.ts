@@ -87,6 +87,7 @@ export async function collectCopyBatches(db: Db, client: BatchClient): Promise<v
     }
     let ok = 0;
     let retry = 0;
+    let bad = 0;
     for await (const result of client.results(id)) {
       const index = Number(result.custom_id.slice(1));
       const article = db.articleByIndex(index);
@@ -102,10 +103,16 @@ export async function collectCopyBatches(db: Db, client: BatchClient): Promise<v
         continue;
       }
       const copy = parseAdCopy(result.text ?? '');
-      db.recordCopy(article.url, copy, copy ? `only ${copy.headlines.length} headlines / ${copy.descriptions.length} descriptions passed the checks` : 'answer was not valid JSON', COPY_MAX_ATTEMPTS);
+      // When an answer can't be used, keep why and how it started, so the Output tab shows what Haiku returned.
+      const snippet = (result.text ?? '').replace(/\s+/g, ' ').slice(0, 150);
+      const error = copy
+        ? `only ${copy.headlines.length} headlines / ${copy.descriptions.length} descriptions passed the checks`
+        : `answer was not valid JSON (stop_reason ${result.stopReason ?? 'unknown'}): ${snippet}`;
+      if (!copy) bad++;
+      db.recordCopy(article.url, copy, error, COPY_MAX_ATTEMPTS);
       ok++;
     }
     db.closeBatch(id);
-    log(`ad copy: batch ${id} ended: ${ok} answers, ${retry} errors`);
+    log(`ad copy: batch ${id} ended: ${ok} answers (${bad} not readable as JSON), ${retry} errors`);
   }
 }

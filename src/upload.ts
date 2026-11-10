@@ -5,6 +5,8 @@ import {
   AdsError,
   adsFromArticles,
   campaignOperations,
+  topUpOperations,
+  type CampaignPlan,
   idFromResourceName,
   gaqlString,
   toMicros,
@@ -249,6 +251,75 @@ export async function uploadCampaign(db: Db, ads: AdsPort, customerId: string, c
     }
   }
   db.markCampaignAttemptFailed(name, 'too many rejected ads', UPLOAD_MAX_ATTEMPTS);
+}
+
+// ---------- top-up ----------
+// Adds ads whose copy arrived after their campaign was uploaded (and their keywords, and any ad group
+// that didn't exist yet) to the existing campaign. Rejected ads are left out, as in a normal upload.
+export async function topUpCampaign(db: Db, ads: AdsPort, customerId: string, cap: number, name: string): Promise<void> {
+  const campaign = db.campaign(name);
+  if (!campaign?.campaign_id) return;
+  let remaining = db.articlesOf(name).filter((a) => a.ad_status === 'skipped' && a.copy_status === 'done');
+  if (remaining.length === 0) return;
+
+  const rows = await queryCounted(
+    db,
+    ads,
+    cap,
+    `SELECT ad_group.id, ad_group.name FROM ad_group WHERE campaign.id = ${campaign.campaign_id} AND ad_group.status != 'REMOVED'`,
+    'top-up ad groups',
+  );
+  const existingAdGroups = new Map(rows.map((r) => [String(r.ad_group.name), String(r.ad_group.id)]));
+  const leftOut: { url: string; error: string }[] = [];
+
+  for (let round = 0; round < 10 && remaining.length > 0; round++) {
+    const plan = topUpOperations(customerId, campaign.campaign_id, adsFromArticles(remaining), existingAdGroups);
+    spend(db, cap, plan.operations.length, 'top-up');
+    try {
+      const names = await ads.mutate(plan.operations);
+      const added = adsFromResponse(plan, names);
+      db.markAdsAdded(added, leftOut);
+      log(`top-up: "${name}": ${added.length} ads added, ${leftOut.length} rejected`);
+      return;
+    } catch (error) {
+      if (!(error instanceof AdsError)) throw error;
+      const bad = rejectedUrls(plan, error);
+      if (!bad) {
+        log(`top-up: "${name}" failed: ${error.message.slice(0, 300)}`);
+        db.set('status', `Top-up of "${name}" failed: ${error.message.slice(0, 200)}`);
+        return;
+      }
+      for (const [url, reason] of bad) leftOut.push({ url, error: reason });
+      remaining = remaining.filter((a) => !bad.has(a.url));
+      log(`top-up: "${name}": Google rejected ${bad.size} ads/keywords; sending again without them`);
+    }
+  }
+  if (leftOut.length > 0) db.markAdsAdded([], leftOut);
+}
+
+// ad_group_ad resource name: customers/x/adGroupAds/{adGroupId}~{adId}
+function adsFromResponse(plan: CampaignPlan, names: string[]): { url: string; adGroupId: string; adId: string }[] {
+  const out: { url: string; adGroupId: string; adId: string }[] = [];
+  plan.roles.forEach((role, i) => {
+    if (role.kind !== 'ad') return;
+    const [adGroupId = '', adId = ''] = idFromResourceName(names[i]).split('~');
+    out.push({ url: role.url, adGroupId, adId });
+  });
+  return out;
+}
+
+// Which articles Google rejected (ad or keyword level), with the reason. Undefined if anything else failed.
+function rejectedUrls(plan: CampaignPlan, error: AdsError): Map<string, string> | undefined {
+  if (error.failures.length === 0) return undefined;
+  const bad = new Map<string, string>();
+  for (const failure of error.failures) {
+    const role = failure.index === undefined ? undefined : plan.roles[failure.index];
+    const reason = `${failure.code}: ${failure.message}`.slice(0, 500);
+    if (role?.kind === 'ad') bad.set(role.url, reason);
+    else if (role?.kind === 'keyword') role.urls.forEach((u) => bad.set(u, reason));
+    else return undefined;
+  }
+  return bad;
 }
 
 // ---------- enable ----------
