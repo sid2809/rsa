@@ -1,0 +1,25 @@
+{
+  "name": "rsa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Responsive search ads pipeline: articles in a Google Sheet -> Haiku ad copy (Batch API) -> paused Google Ads Search campaigns",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/worker.ts",
+    "group": "node scripts/group.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.7.0",
+    "google-ads-api": "^26.1.0",
+    "googleapis": "^189.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0"
+  }
+}
