@@ -2,10 +2,11 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Db } from './db.ts';
 import { log } from './log.ts';
-import { googleSheet, parseSettings, parseInput, type SheetPort, type Settings } from './sheet.ts';
+import { googleSheet, parseSettings, parseInput, isUngroupedInput, parseUngroupedInput, type SheetPort, type Settings, type InputRow } from './sheet.ts';
+import { runGrouping } from './grouping.ts';
 import { anthropicBatchClient, submitCopyBatch, collectCopyBatches, type BatchClient } from './copy.ts';
-import { googleAdsPort, type AdsPort } from './ads.ts';
-import { ensureLabel, preflight, existingCampaigns, uploadCampaign, topUpCampaign, enableWave, sync, QuotaReached } from './upload.ts';
+import { googleAdsPort, AdsError, isQuotaError, type AdsPort } from './ads.ts';
+import { ensureLabel, preflight, existingCampaigns, uploadCampaign, topUpCampaign, enableWave, sync, QuotaReached, googleQuotaExhausted } from './upload.ts';
 import { writeReports } from './report.ts';
 import { WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
 
@@ -37,18 +38,27 @@ export async function tick(deps: Deps): Promise<void> {
   }
   const cap = settings.quotaCap || DEFAULT_DAILY_QUOTA_CAP;
 
-  // 1. Import the Input tab once.
+  // 1. Import the Input tab once. A list with Campaign / Ad Group columns is used as it is;
+  //    a plain list (URL, Title, Keywords) is grouped by Haiku first.
   if (db.articleCount() === 0) {
-    const { rows, problems } = parseInput(await sheet.read('Input'));
+    const input = await sheet.read('Input');
+    const ungrouped = isUngroupedInput(input);
+    const { rows, problems } = ungrouped ? parseUngroupedInput(input) : parseInput(input);
     if (problems.length > 0) {
       db.set('status', `Input not imported: ${problems.join('; ')}`);
       log(`input: ${problems.length} problems, nothing imported: ${problems.slice(0, 5).join('; ')}`);
       return;
     }
-    db.importArticles(rows);
-    db.set('status', `Input imported: ${rows.length} articles`);
-    log(`input: imported ${rows.length} articles`);
+    if (ungrouped) {
+      db.importUngrouped(rows as { url: string; title: string; keyword: string }[]);
+      db.set('mode', 'grouping');
+    } else db.importArticles(rows as InputRow[]);
+    db.set('status', `Input imported: ${rows.length} articles${ungrouped ? ' (to be grouped by Haiku)' : ''}`);
+    log(`input: imported ${rows.length} articles${ungrouped ? ' (to be grouped by Haiku)' : ''}`);
   }
+
+  // 1b. Grouping by Haiku (plain lists only). Nothing else runs until it is saved.
+  if (db.get('mode') === 'grouping' && !(await runGrouping(db, batches))) return;
 
   const wavesOn = WAVES.filter((w) => settings.upload[w]);
 
@@ -68,6 +78,11 @@ export async function tick(deps: Deps): Promise<void> {
     return;
   }
   const ads = deps.adsFor(settings.account);
+  const quotaUntil = db.get('google_quota_until');
+  if (quotaUntil && Date.parse(quotaUntil) > Date.now()) {
+    db.set('status', `Waiting: Google's daily API limit is used up. Resuming at ${quotaUntil}`);
+    return;
+  }
 
   try {
     if (wavesOn.length > 0) await uploadWaves(db, ads, settings, cap, wavesOn);
@@ -80,6 +95,8 @@ export async function tick(deps: Deps): Promise<void> {
       db.set('sync_requested', '0');
     }
   } catch (error) {
+    // Google refused a query or an enable for quota (uploads handle this themselves).
+    if (error instanceof AdsError && isQuotaError(error)) error = googleQuotaExhausted(db, error, 0);
     if (error instanceof QuotaReached) {
       db.set('status', `Waiting: ${error.message}`);
       log(error.message);
@@ -163,6 +180,12 @@ async function main(): Promise<void> {
   const db = new Db(join(dataDir, 'rsa.sqlite'));
   // A failed preflight is tried again after a restart.
   if (db.get('preflight') === 'failed') db.set('preflight', '');
+  // One-time (14 Nov 2026): tries used up by quota or temporary errors are given back (pending campaigns only).
+  if (db.get('reset_temporary_failures_v1') !== 'done') {
+    const reset = db.resetTemporaryFailures();
+    db.set('reset_temporary_failures_v1', 'done');
+    if (reset > 0) log(`upload: ${reset} pending campaigns get their tries back (quota/temporary errors)`);
+  }
   // One-time (10 Nov 2026): copy that failed only because the answer wasn't read as JSON gets 3 new tries.
   if (db.get('reset_unreadable_copy_v1') !== 'done') {
     const reset = db.resetUnreadableCopy();

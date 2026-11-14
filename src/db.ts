@@ -28,6 +28,10 @@ export interface ArticleRow {
   approval: string | null;
   policy_topics: string | null;
   error: string | null;
+  theme?: string | null;
+  dish?: string | null;
+  tag_attempts?: number;
+  tag_batch?: string | null;
 }
 
 export interface CampaignRow {
@@ -95,6 +99,17 @@ export class Db {
         value TEXT NOT NULL
       );
     `);
+    // Columns added later (grouping by Haiku, batch kinds). Existing databases get them on start.
+    this.addColumn('articles', 'theme', 'TEXT');
+    this.addColumn('articles', 'dish', 'TEXT');
+    this.addColumn('articles', 'tag_attempts', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('articles', 'tag_batch', 'TEXT');
+    this.addColumn('batches', 'kind', "TEXT NOT NULL DEFAULT 'copy'");
+  }
+
+  private addColumn(table: string, column: string, type: string): void {
+    const columns = this.sql.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!columns.some((c) => c.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   // ---------- key/value ----------
@@ -153,8 +168,82 @@ export class Db {
     }
   }
 
-  openBatches(): string[] {
-    return (this.sql.prepare("SELECT id FROM batches WHERE status = 'open' ORDER BY created_at").all() as { id: string }[]).map((r) => r.id);
+  openBatches(kind: 'copy' | 'tag' | 'themes' = 'copy'): string[] {
+    return (this.sql.prepare("SELECT id FROM batches WHERE status = 'open' AND kind = ? ORDER BY created_at").all(kind) as { id: string }[]).map((r) => r.id);
+  }
+
+  addOtherBatch(id: string, kind: 'tag' | 'themes', requestCount: number): void {
+    this.sql.prepare('INSERT INTO batches (id, created_at, request_count, kind) VALUES (?, ?, ?, ?)').run(id, new Date().toISOString(), requestCount, kind);
+  }
+
+  closeOtherBatch(id: string): void {
+    this.sql.prepare("UPDATE batches SET status = 'closed' WHERE id = ?").run(id);
+  }
+
+  // ---------- grouping (lists without a Campaign column) ----------
+  importUngrouped(rows: { url: string; title: string; keyword: string }[]): void {
+    const insert = this.sql.prepare("INSERT INTO articles (url, campaign, ad_group, keyword, title, wave, row_index) VALUES (?, '', '', ?, ?, 'rest', ?)");
+    this.sql.exec('BEGIN');
+    try {
+      rows.forEach((row, index) => insert.run(row.url, row.keyword, row.title, index));
+      this.sql.exec('COMMIT');
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  articlesNeedingTag(maxAttempts: number): ArticleRow[] {
+    return this.sql
+      .prepare('SELECT * FROM articles WHERE theme IS NULL AND tag_batch IS NULL AND tag_attempts < ? ORDER BY row_index')
+      .all(maxAttempts) as unknown as ArticleRow[];
+  }
+
+  markTagBatch(id: string, urls: string[]): void {
+    this.sql.exec('BEGIN');
+    try {
+      const mark = this.sql.prepare('UPDATE articles SET tag_batch = ? WHERE url = ?');
+      for (const url of urls) mark.run(id, url);
+      this.sql.exec('COMMIT');
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordTag(url: string, theme: string | null, dish: string | null): void {
+    if (theme) this.sql.prepare('UPDATE articles SET theme = ?, dish = ?, tag_batch = NULL WHERE url = ?').run(theme, dish, url);
+    else this.sql.prepare('UPDATE articles SET tag_attempts = tag_attempts + 1, tag_batch = NULL WHERE url = ?').run(url);
+  }
+
+  // Articles still in a closed tag batch without a result go back in the queue.
+  releaseTagBatch(id: string): void {
+    this.sql.prepare('UPDATE articles SET tag_batch = NULL, tag_attempts = tag_attempts + 1 WHERE tag_batch = ? AND theme IS NULL').run(id);
+  }
+
+  untaggedCount(maxAttempts: number): number {
+    return (this.sql.prepare('SELECT COUNT(*) AS n FROM articles WHERE theme IS NULL AND (tag_batch IS NOT NULL OR tag_attempts < ?)').get(maxAttempts) as { n: number }).n;
+  }
+
+  // Articles Haiku couldn't tag after every try go to "Other", grouped by their keyword.
+  tagLeftoversAsOther(): number {
+    return Number(this.sql.prepare("UPDATE articles SET theme = 'Other', dish = keyword WHERE theme IS NULL").run().changes);
+  }
+
+  saveGrouping(assignments: { url: string; campaign: string; adGroup: string; wave: Wave }[]): void {
+    this.sql.exec('BEGIN');
+    try {
+      const up = this.sql.prepare('UPDATE articles SET campaign = ?, ad_group = ?, wave = ? WHERE url = ?');
+      const camp = this.sql.prepare('INSERT OR IGNORE INTO campaigns (name, wave) VALUES (?, ?)');
+      for (const a of assignments) {
+        up.run(a.campaign, a.adGroup, a.wave, a.url);
+        camp.run(a.campaign, a.wave);
+      }
+      this.sql.exec('COMMIT');
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   closeBatch(id: string): void {
@@ -294,6 +383,11 @@ export class Db {
     this.sql.prepare('UPDATE campaigns SET attempts = ?, error = ?, status = ? WHERE name = ?').run(attempts, error, attempts >= maxAttempts ? 'failed' : 'pending', name);
   }
 
+  // Records an error on a campaign without using one of its tries (temporary errors).
+  noteCampaignError(name: string, error: string): void {
+    this.sql.prepare('UPDATE campaigns SET error = ? WHERE name = ?').run(error, name);
+  }
+
   markEnabled(name: string): void {
     this.sql.prepare('UPDATE campaigns SET enabled_at = ? WHERE name = ?').run(new Date().toISOString(), name);
   }
@@ -309,6 +403,20 @@ export class Db {
   // ---------- API quota ----------
   addOps(count: number, kind: string): void {
     if (count > 0) this.sql.prepare('INSERT INTO ops (ts, count, kind) VALUES (?, ?, ?)').run(Date.now(), count, kind);
+  }
+
+  // Calls Google refused for quota are not counted against the worker's own cap.
+  refundOps(count: number, kind: string): void {
+    if (count > 0) this.sql.prepare('INSERT INTO ops (ts, count, kind) VALUES (?, ?, ?)').run(Date.now(), -count, kind);
+  }
+
+  // One-time: pending campaigns whose tries were used up by quota or temporary errors get them back.
+  resetTemporaryFailures(): number {
+    return Number(
+      this.sql
+        .prepare("UPDATE campaigns SET attempts = 0 WHERE status = 'pending' AND (error LIKE 'quota_error%' OR error LIKE 'database_error%' OR error LIKE 'internal_error%')")
+        .run().changes,
+    );
   }
 
   opsLast24h(): number {

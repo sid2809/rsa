@@ -22,6 +22,8 @@ Rules:
 - Put the search keyword (or a natural close variant) in at least 3 headlines when it fits the length limit.
 - Describe what the reader gets from the article. Do not promise anything the article title doesn't support.
 - No exclamation marks in headlines, no emoji, no ALL CAPS words, no phone numbers, no prices, no "click here".
+- No clickbait or sensational wording. Never use: hidden, secret, revealed, reveal, truth about, warning, shocking, you won't believe, what happens, the real reason, read the full, unlock, mystery. No questions that hold back the answer to make people click. Say plainly what the article covers.
+- Where it fits naturally, use "Best" and "2026" in a few headlines (e.g. "Best Banana Bread Recipe", "Banana Bread Recipe 2026"). Not in every headline, and only where it reads naturally.
 - Title Case for headlines, sentence case for descriptions ending with a period.`;
 
 export const AD_COPY_SCHEMA = {
@@ -37,6 +39,8 @@ export const AD_COPY_SCHEMA = {
 export function userMessage(article: { title: string; keyword: string; url: string }): string {
   return `Article title: ${article.title}\nSearch keyword: ${article.keyword}\nLanding page: ${article.url}`;
 }
+
+export const CLICKBAIT = /\b(hidden|secrets?|revealed?|reveals|truth about|warnings?|shocking|you won'?t believe|what happens|real reason|read the full|unlock|myster(y|ies))\b/i;
 
 // Keeps only lines Google Ads will accept; drops the rest instead of failing the whole ad.
 export function cleanAdCopy(raw: AdCopy): AdCopy {
@@ -56,6 +60,7 @@ function cleanLines(lines: unknown, maxLength: number, isHeadline: boolean): str
     const key = text.toLowerCase();
     if (text.length === 0 || text.length > maxLength || seen.has(key)) continue;
     if (isHeadline && text.includes('!')) continue; // Google doesn't allow "!" in headlines
+    if (CLICKBAIT.test(text)) continue; // wording common in the ads Google flagged as clickbait (Faith list, Nov 2026)
     if (/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text)) continue; // no emoji
     seen.add(key);
     result.push(text);

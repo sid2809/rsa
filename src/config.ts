@@ -7,7 +7,10 @@ export const MAX_CPC_INR = 3; // Maximize clicks, CPC capped at this
 export const LOCATION_ID = '2840'; // United States
 export const LOCATION_TARGETING = 'PRESENCE' as const; // people in the US, not people interested in the US
 export const LANGUAGE_ID = '1000'; // English
-export const LABEL_NAME = 'Ponly Faith';
+// Label on every campaign of this service. Set LABEL_NAME in Railway for a new list (e.g. "Ponly Kitchen").
+// Unset = the Faith service, which also finds its campaigns by the name prefix "Ponly Faith |" (as before).
+export const LABEL_NAME = process.env.LABEL_NAME?.trim() || 'Ponly Faith';
+export const FIND_CAMPAIGNS_BY_LABEL = Boolean(process.env.LABEL_NAME?.trim());
 // Display's "enhancements off": Google's automatically created text assets switched off.
 export const TEXT_ASSET_AUTOMATION_OFF = true;
 

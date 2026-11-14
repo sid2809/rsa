@@ -38,6 +38,23 @@ export class AdsError extends Error {
   }
 }
 
+// Google's daily operation limit for the developer token (shared with every tool on that token).
+export function isQuotaError(error: AdsError): boolean {
+  return error.failures.some((f) => f.code.startsWith('quota_error')) || /too many requests|RESOURCE_EXHAUSTED/i.test(error.message);
+}
+
+// Seconds Google says to wait ("Retry in 82374 seconds"); 1 hour if it doesn't say.
+export function quotaRetrySeconds(error: AdsError): number {
+  const match = error.message.match(/retry in (\d+) seconds/i);
+  return match ? Number(match[1]) : 3600;
+}
+
+// Temporary errors that should just be tried again later (e.g. "Multiple requests were attempting to modify the same resource").
+export function isRetryableError(error: AdsError): boolean {
+  if (error.failures.length > 0 && error.failures.every((f) => /^(database_error|internal_error)/.test(f.code))) return true;
+  return /retry the request|DEADLINE_EXCEEDED|UNAVAILABLE|ECONNRESET|ETIMEDOUT/i.test(error.message);
+}
+
 export function cleanCustomerId(id: string): string {
   return id.replace(/[^0-9]/g, '');
 }

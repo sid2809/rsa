@@ -15,7 +15,7 @@ Grouping and ad copy rules come from [abhishekblue/n8n-bulk-google-ads](https://
 | Bidding | Maximize clicks, max CPC ₹3 |
 | Budget | ₹2,700 a day per campaign (not shared) |
 | Location / language | United States (presence: people in the US) / English |
-| Label | `Ponly Faith` |
+| Label | `LABEL_NAME` variable (Faith service: `Ponly Faith`) |
 | Tracking | final URL suffix, see `src/config.ts` (`FINAL_URL_SUFFIX`); gclid needs auto-tagging on in the account |
 | Automatically created text assets | off |
 | Ad groups | the repo's grouping: up to 3 articles per ad group, up to 4 ad groups per campaign |
@@ -24,7 +24,22 @@ Grouping and ad copy rules come from [abhishekblue/n8n-bulk-google-ads](https://
 
 All settings are in `src/config.ts`. Account IDs are never in the code (this repo is public): the Google Ads account ID goes in the Sheet, the MCC ID in Railway.
 
-## 1. Make the Input file
+## New lists (Kitchen and later): grouping by Haiku
+
+Paste a plain list into the Input tab: `URL, Title, Keywords`. The worker then groups it itself:
+
+1. Haiku gets every keyword once and returns a list of themes (e.g. "Chicken", "Cheesecake").
+2. Haiku tags each article with one theme and its dish (Batch API).
+3. Code puts articles with the same dish together: 3 per ad group, up to 4 ad groups per campaign, one theme per campaign. Campaign name: `<Theme> | 0001`.
+4. The grouping appears in the **Output** tab (Theme and Dish columns). Review it, then tick **Upload pilot**.
+
+Run each list as its **own Railway service with its own Sheet and volume**, and set `LABEL_NAME` (e.g. `Ponly Kitchen`). The service finds its campaigns by that label. Without `LABEL_NAME` the service behaves as the Faith service (label "Ponly Faith", campaigns found by the name prefix `Ponly Faith |`).
+
+## Google's daily API limit
+
+Google allows 15,000 operations a day per developer token, shared with every tool on that token (e.g. the display pipeline). When Google refuses a call for quota, the worker waits until the time Google gives, without using a campaign's tries. Temporary errors ("Multiple requests were attempting to modify the same resource") are tried again later, also without using tries. Uploads leave 40 operations free under the cap for the daily sync.
+
+## 1. Make the Input file (lists that are already grouped)
 
 ```bash
 npm install

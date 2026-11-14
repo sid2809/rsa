@@ -4,7 +4,7 @@ import { pilotResult } from './upload.ts';
 import { WAVES, PILOT_MIN_APPROVED_SHARE } from './config.ts';
 
 export function outputRows(db: Db): (string | number)[][] {
-  const header = ['Row', 'Wave', 'Campaign', 'Ad Group', 'Keyword', 'Title', 'URL', 'Copy', 'Headlines', 'Descriptions', 'Ad status', 'Approval', 'Policy topics', 'Campaign ID', 'Ad group ID', 'Ad ID', 'Error'];
+  const header = ['Row', 'Wave', 'Campaign', 'Ad Group', 'Keyword', 'Title', 'URL', 'Copy', 'Headlines', 'Descriptions', 'Ad status', 'Approval', 'Policy topics', 'Campaign ID', 'Ad group ID', 'Ad ID', 'Error', 'Theme', 'Dish'];
   const campaignIds = new Map(db.campaigns().map((c) => [c.name, c.campaign_id ?? '']));
   const rows = db.allArticles().map((a) => [
     a.row_index + 2,
@@ -24,6 +24,8 @@ export function outputRows(db: Db): (string | number)[][] {
     a.ad_group_id ?? '',
     a.ad_id ?? '',
     a.error ?? a.copy_error ?? '',
+    a.theme ?? '',
+    a.dish ?? '',
   ]);
   return [header, ...rows];
 }

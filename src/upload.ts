@@ -9,11 +9,15 @@ import {
   type CampaignPlan,
   idFromResourceName,
   gaqlString,
+  isQuotaError,
+  isRetryableError,
+  quotaRetrySeconds,
   toMicros,
   cleanCustomerId,
 } from './ads.ts';
 import {
   LABEL_NAME,
+  FIND_CAMPAIGNS_BY_LABEL,
   UPLOAD_MAX_ATTEMPTS,
   CAMPAIGN_BUDGET_INR,
   MAX_CPC_INR,
@@ -28,12 +32,31 @@ import { log } from './log.ts';
 
 export const CAMPAIGN_PREFIX = 'Ponly Faith |';
 
+// GAQL condition matching this service's campaigns: by label for new lists, by name prefix for Faith (unchanged).
+export function ourCampaigns(db: Db): string {
+  if (!FIND_CAMPAIGNS_BY_LABEL) return `campaign.name LIKE ${gaqlString(`${CAMPAIGN_PREFIX}%`)}`;
+  const label = db.get('label_resource');
+  if (!label) throw new Error('label not created yet');
+  return `campaign.labels CONTAINS ANY (${gaqlString(label)})`;
+}
+
 export class QuotaReached extends Error {}
 
 // Checks the 24-hour operation budget before any Google Ads call. Every call is counted (failed ones too).
-export function spend(db: Db, cap: number, count: number, kind: string): void {
-  if (db.opsLast24h() + count > cap) throw new QuotaReached(`daily API cap ${cap} reached (${db.opsLast24h()} used in the last 24 h, ${count} more needed for ${kind})`);
+// `reserve` keeps operations free under the cap (uploads leave room for the daily sync).
+export function spend(db: Db, cap: number, count: number, kind: string, reserve = 0): void {
+  if (db.opsLast24h() + count > cap - reserve) throw new QuotaReached(`daily API cap ${cap} reached (${db.opsLast24h()} used in the last 24 h, ${count} more needed for ${kind})`);
   db.addOps(count, kind);
+}
+
+export const SYNC_RESERVE = 40;
+
+// Google refused for quota: wait until the time Google gives; the refused call isn't counted, no try is used.
+export function googleQuotaExhausted(db: Db, error: AdsError, refund: number): QuotaReached {
+  db.refundOps(refund, 'refused by Google (quota)');
+  const until = new Date(Date.now() + quotaRetrySeconds(error) * 1000);
+  db.set('google_quota_until', until.toISOString());
+  return new QuotaReached(`Google's daily API limit for the developer token is used up (shared with other tools on it). Resuming at ${until.toISOString()}`);
 }
 
 const rowsToOps = (rows: number) => Math.max(1, Math.ceil(rows / 10000));
@@ -66,6 +89,9 @@ export async function preflight(db: Db, ads: AdsPort, customerId: string, cap: n
   notes.push(account?.customer?.auto_tagging_enabled ? 'auto-tagging is ON (gclid will be added)' : 'auto-tagging is OFF: no gclid on clicks. Turn it on in Google Ads > Admin > Account settings if you want it');
 
   const label = await ensureLabel(db, ads, cap);
+  // Checks the query that finds this service's campaigns (by label for new lists) works.
+  const existing = await existingCampaigns(db, ads, cap);
+  notes.push(`${existing.size} campaigns with this service's ${FIND_CAMPAIGNS_BY_LABEL ? `label "${LABEL_NAME}"` : 'name prefix'} already in the account`);
 
   // 1. Check a real campaign of the pilot against Google's rules, without creating it.
   const first = db.campaignsToUpload('pilot', UPLOAD_MAX_ATTEMPTS)[0];
@@ -153,7 +179,7 @@ export async function existingCampaigns(db: Db, ads: AdsPort, cap: number): Prom
     db,
     ads,
     cap,
-    `SELECT campaign.id, campaign.name FROM campaign WHERE campaign.name LIKE ${gaqlString(`${CAMPAIGN_PREFIX}%`)} AND campaign.status != 'REMOVED'`,
+    `SELECT campaign.id, campaign.name FROM campaign WHERE ${ourCampaigns(db)} AND campaign.status != 'REMOVED'`,
     'existing campaigns',
   );
   return new Map(rows.map((r) => [r.campaign.name as string, String(r.campaign.id)]));
@@ -207,7 +233,7 @@ export async function uploadCampaign(db: Db, ads: AdsPort, customerId: string, c
       return;
     }
     const plan = campaignOperations(customerId, name, adsFromArticles(remaining), label);
-    spend(db, cap, plan.operations.length, 'upload');
+    spend(db, cap, plan.operations.length, 'upload', SYNC_RESERVE);
     try {
       const names = await ads.mutate(plan.operations);
       const campaignId = idFromResourceName(names[1]);
@@ -226,6 +252,12 @@ export async function uploadCampaign(db: Db, ads: AdsPort, customerId: string, c
       return;
     } catch (error) {
       if (!(error instanceof AdsError)) throw error;
+      if (isQuotaError(error)) throw googleQuotaExhausted(db, error, plan.operations.length);
+      if (isRetryableError(error)) {
+        db.noteCampaignError(name, error.message.slice(0, 500));
+        log(`upload: "${name}": temporary error, will try again: ${error.message.slice(0, 200)}`);
+        return;
+      }
       const badUrls = new Set<string>();
       let campaignLevel = error.failures.length === 0;
       for (const failure of error.failures) {
@@ -274,7 +306,7 @@ export async function topUpCampaign(db: Db, ads: AdsPort, customerId: string, ca
 
   for (let round = 0; round < 10 && remaining.length > 0; round++) {
     const plan = topUpOperations(customerId, campaign.campaign_id, adsFromArticles(remaining), existingAdGroups);
-    spend(db, cap, plan.operations.length, 'top-up');
+    spend(db, cap, plan.operations.length, 'top-up', SYNC_RESERVE);
     try {
       const names = await ads.mutate(plan.operations);
       const added = adsFromResponse(plan, names);
@@ -283,6 +315,11 @@ export async function topUpCampaign(db: Db, ads: AdsPort, customerId: string, ca
       return;
     } catch (error) {
       if (!(error instanceof AdsError)) throw error;
+      if (isQuotaError(error)) throw googleQuotaExhausted(db, error, plan.operations.length);
+      if (isRetryableError(error)) {
+        log(`top-up: "${name}": temporary error, will try again: ${error.message.slice(0, 200)}`);
+        return;
+      }
       const bad = rejectedUrls(plan, error);
       if (!bad) {
         log(`top-up: "${name}" failed: ${error.message.slice(0, 300)}`);
@@ -350,7 +387,7 @@ export async function sync(db: Db, ads: AdsPort, cap: number): Promise<void> {
     db,
     ads,
     cap,
-    `SELECT campaign.id, campaign.status, campaign.serving_status FROM campaign WHERE campaign.name LIKE ${gaqlString(`${CAMPAIGN_PREFIX}%`)} AND campaign.status != 'REMOVED'`,
+    `SELECT campaign.id, campaign.status, campaign.serving_status FROM campaign WHERE ${ourCampaigns(db)} AND campaign.status != 'REMOVED'`,
     'sync campaigns',
   );
   for (const r of campaigns) db.setCampaignServing(String(r.campaign.id), `${statusName(r.campaign.status)} / ${servingName(r.campaign.serving_status)}`);
@@ -360,7 +397,7 @@ export async function sync(db: Db, ads: AdsPort, cap: number): Promise<void> {
     cap,
     `SELECT ad_group_ad.ad.id, ad_group_ad.policy_summary.approval_status, ad_group_ad.policy_summary.review_status,
             ad_group_ad.policy_summary.policy_topic_entries
-     FROM ad_group_ad WHERE campaign.name LIKE ${gaqlString(`${CAMPAIGN_PREFIX}%`)} AND campaign.status != 'REMOVED' AND ad_group_ad.status != 'REMOVED'`,
+     FROM ad_group_ad WHERE ${ourCampaigns(db)} AND campaign.status != 'REMOVED' AND ad_group_ad.status != 'REMOVED'`,
     'sync ads',
   );
   for (const r of adsRows) {

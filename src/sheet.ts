@@ -149,3 +149,29 @@ export function parseInput(rows: string[][]): { rows: InputRow[]; problems: stri
   }
   return { rows: out, problems: [...new Set(problems)].slice(0, 50) };
 }
+
+// A list without Campaign / Ad Group columns (URL, Title, Keywords): grouped by Haiku in the worker.
+export function isUngroupedInput(rows: string[][]): boolean {
+  const header = (rows[0] ?? []).map((h) => h.trim().toLowerCase());
+  return !header.includes('campaign') && header.includes('url') && header.includes('title') && (header.includes('keywords') || header.includes('keyword'));
+}
+
+export function parseUngroupedInput(rows: string[][]): { rows: { url: string; title: string; keyword: string }[]; problems: string[] } {
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const [u, t] = [header.indexOf('url'), header.indexOf('title')];
+  const k = header.includes('keywords') ? header.indexOf('keywords') : header.indexOf('keyword');
+  const problems: string[] = [];
+  const out: { url: string; title: string; keyword: string }[] = [];
+  const urls = new Set<string>();
+  rows.slice(1).forEach((r, i) => {
+    const line = i + 2;
+    const row = { url: String(r[u] ?? '').trim(), title: String(r[t] ?? '').trim(), keyword: String(r[k] ?? '').trim() };
+    if (!row.url && !row.title && !row.keyword) return;
+    if (!row.title || !row.keyword) problems.push(`row ${line}: empty cell`);
+    if (!/^https:\/\//.test(row.url)) problems.push(`row ${line}: URL must start with https://`);
+    if (urls.has(row.url)) problems.push(`row ${line}: duplicate URL`);
+    urls.add(row.url);
+    out.push(row);
+  });
+  return { rows: out, problems: problems.slice(0, 50) };
+}
