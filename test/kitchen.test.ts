@@ -81,8 +81,12 @@ test('grouping: same dish together, max 3 ads per ad group, max 4 ad groups per 
   // The 7 "chicken marsala" articles: two full ad groups of 3 together.
   const marsala = out.filter((a) => a.adGroup.startsWith('chicken marsala'));
   assert.ok(marsala.length >= 6);
-  // Pilot: whole campaigns until at least 100 articles (here all 50).
-  assert.ok(out.every((a) => a.wave === 'pilot'));
+  // Pilot: the first campaign of every theme, nothing else.
+  const pilotCampaigns = [...new Set(out.filter((a) => a.wave === 'pilot').map((a) => a.campaign))];
+  assert.deepEqual(pilotCampaigns.map((c) => c.split(' | ')[0]).sort(), ['Cakes', 'Chicken']);
+  const firstPerTheme = new Map<string, string>();
+  for (const a of out) if (!firstPerTheme.has(a.campaign.split(' | ')[0])) firstPerTheme.set(a.campaign.split(' | ')[0], a.campaign);
+  assert.deepEqual(pilotCampaigns.sort(), [...firstPerTheme.values()].sort());
 });
 
 test('kitchen flow: themes -> tags -> grouping (no upload yet) -> upload with label after the box', async () => {
@@ -114,7 +118,9 @@ test('kitchen flow: themes -> tags -> grouping (no upload yet) -> upload with la
   assert.equal((labelCreate!.operations[0].resource as any).name, 'Ponly Kitchen');
   const pilot = db.campaigns('pilot');
   assert.ok(pilot.length > 0 && pilot.every((c) => c.status === 'uploaded'));
-  assert.ok(db.allArticles().filter((a) => a.wave === 'pilot').length >= 100);
+  // Pilot = one campaign per theme.
+  const themesInList = new Set(db.allArticles().map((a) => a.theme));
+  assert.equal(db.campaigns('pilot').length, themesInList.size);
 });
 
 test('Google quota error: waits, no try used, refused call not counted; carries on after the wait', async () => {
@@ -225,4 +231,61 @@ test('repair never touches a grouping that already has campaigns in Google Ads',
   db.sql.prepare("UPDATE campaigns SET status = 'uploaded', campaign_id = '1' WHERE name = ?").run(name);
   db.sql.prepare("UPDATE articles SET tag_batch = 'orphan' WHERE row_index = 0").run();
   assert.deepEqual(db.repairUnrecordedTagBatches(), []);
+});
+
+test('pot butter is left out: not grouped, no copy, never uploaded', async () => {
+  const { deps, sheet, batches, ads, db } = setup();
+  const input = sheet.tabs.get('Input')!;
+  input.push(['https://ponly.com/kitchen/how-to-make-pot-butter/', 'How to Make Pot Butter', 'how to make pot butter']);
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps);
+  const pot = db.article('https://ponly.com/kitchen/how-to-make-pot-butter/')!;
+  assert.equal(pot.wave, 'excluded');
+  assert.equal(pot.campaign, '');
+  sheet.setting('Upload pilot', 'TRUE');
+  sheet.setting('Upload rest', 'TRUE');
+  for (let i = 0; i < 4; i++) await tick(deps);
+  assert.ok(!batches.sent.flat().some((r) => r.custom_id === `a${pot.row_index}`), 'no copy written');
+  assert.ok(!ads.calls.some((c) => c.operations.some((o) => JSON.stringify(o.resource).includes('pot-butter'))), 'never sent to Google');
+  assert.ok(db.campaigns().every((c) => c.status === 'uploaded'));
+});
+
+test('"Other" articles are re-tagged with extra themes, then grouped again (one-time, before any upload)', async () => {
+  const { deps, sheet, batches, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps);
+  assert.equal(db.get('grouped'), '1');
+  const otherBefore = db.allArticles().filter((a) => a.theme === 'Other');
+  assert.ok(otherBefore.length > 0);
+  // Haiku proposes "Butter Basics" for some "Other" keywords; the re-tag uses it.
+  const original = batches.answer;
+  batches.answer = (req) => {
+    if (req.custom_id === 'extra') return { custom_id: 'extra', type: 'succeeded', text: JSON.stringify({ themes: ['Chicken', 'Quick Bites'] }) };
+    if (req.custom_id.startsWith('t')) {
+      const content = (req.params.messages as { content: string }[])[0].content;
+      assert.match(content, /Quick Bites/, 'extra theme offered when tagging');
+      return { custom_id: req.custom_id, type: 'succeeded', text: JSON.stringify({ theme: 'Quick Bites', dish: 'bites' }) };
+    }
+    return original(req);
+  };
+  assert.equal(db.reopenOtherForRetag(), otherBefore.length);
+  for (let i = 0; i < 3; i++) await tick(deps);
+  assert.equal(db.get('grouped'), '1');
+  const themes = JSON.parse(db.get('themes')!);
+  assert.deepEqual(themes.slice(-2), ['Quick Bites', 'Other'], 'new theme added; Chicken not added twice; Other last');
+  assert.equal(themes.filter((t: string) => t === 'Chicken').length, 1);
+  for (const a of otherBefore) assert.equal(db.article(a.url)!.theme, 'Quick Bites');
+  // Articles outside "Other" kept their themes.
+  for (const a of db.allArticles().filter((x) => !otherBefore.some((o) => o.url === x.url))) assert.equal(a.theme, themeFor(a.keyword).theme);
+  assert.ok(db.campaigns().some((c) => c.name.startsWith('Quick Bites | ')));
+  assert.equal(db.reopenOtherForRetag(), 0, 'nothing left in Other');
+});
+
+test('"Other" re-tag never runs once something is in Google Ads', async () => {
+  const { deps, sheet, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps);
+  db.sql.prepare("UPDATE campaigns SET status = 'uploaded', campaign_id = '9' WHERE rowid = 1").run();
+  assert.equal(db.reopenOtherForRetag(), 0);
+  assert.equal(db.get('grouped'), '1');
 });

@@ -168,11 +168,11 @@ export class Db {
     }
   }
 
-  openBatches(kind: 'copy' | 'tag' | 'themes' = 'copy'): string[] {
+  openBatches(kind: 'copy' | 'tag' | 'themes' | 'extra' = 'copy'): string[] {
     return (this.sql.prepare("SELECT id FROM batches WHERE status = 'open' AND kind = ? ORDER BY created_at").all(kind) as { id: string }[]).map((r) => r.id);
   }
 
-  addOtherBatch(id: string, kind: 'tag' | 'themes', requestCount: number): void {
+  addOtherBatch(id: string, kind: 'tag' | 'themes' | 'extra', requestCount: number): void {
     this.sql.prepare('INSERT INTO batches (id, created_at, request_count, kind) VALUES (?, ?, ?, ?)').run(id, new Date().toISOString(), requestCount, kind);
   }
 
@@ -258,6 +258,42 @@ export class Db {
       throw error;
     }
     return ids;
+  }
+
+  // Nothing of the grouping is in Google Ads yet (no campaign uploaded or failed).
+  groupingUntouched(): boolean {
+    const used = this.sql.prepare("SELECT COUNT(*) AS n FROM campaigns WHERE status != 'pending' OR campaign_id IS NOT NULL OR attempts > 0").get() as { n: number };
+    return used.n === 0;
+  }
+
+  // One-time (15 Nov 2026): re-tag the "Other" articles with extra themes Haiku will propose, then group again.
+  // Only while nothing of the grouping is in Google Ads. Returns how many articles go back for tagging.
+  reopenOtherForRetag(): number {
+    if (this.get('mode') !== 'grouping' || this.get('grouped') !== '1' || !this.groupingUntouched()) return 0;
+    this.sql.exec('BEGIN');
+    try {
+      const n = Number(this.sql.prepare("UPDATE articles SET theme = NULL, dish = NULL, tag_attempts = 0, tag_batch = NULL WHERE theme = 'Other'").run().changes);
+      this.sql.exec("UPDATE articles SET campaign = '', ad_group = '', wave = 'rest' WHERE wave != 'excluded'");
+      this.sql.exec('DELETE FROM campaigns');
+      this.sql.exec("DELETE FROM kv WHERE key = 'grouped'");
+      this.set('need_extra_themes', '1');
+      this.sql.exec('COMMIT');
+      return n;
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  // Articles left out on purpose: never tagged, grouped, written or uploaded.
+  excludeUrls(urls: string[]): number {
+    let n = 0;
+    const up = this.sql.prepare(
+      "UPDATE articles SET wave = 'excluded', campaign = '', ad_group = '', theme = COALESCE(theme, 'Excluded'), copy_status = 'failed', copy_error = 'left out on purpose', ad_status = 'skipped', error = 'left out on purpose' WHERE url = ? AND ad_status != 'uploaded'",
+    );
+    for (const url of urls) n += Number(up.run(url).changes);
+    this.sql.prepare("DELETE FROM campaigns WHERE status = 'pending' AND campaign_id IS NULL AND name NOT IN (SELECT campaign FROM articles WHERE campaign != '')").run();
+    return n;
   }
 
   saveGrouping(assignments: { url: string; campaign: string; adGroup: string; wave: Wave }[]): void {

@@ -2,19 +2,19 @@
 //
 // 1. Themes: one request with every keyword; Haiku returns a list of themes (campaign level, e.g. "Chicken").
 // 2. Tags:   one request per article; Haiku picks one theme from that list and names the dish/topic.
+// Pilot: the first campaign of every theme.
 // 3. Code:   articles with the same dish go together, 3 per ad group (Google's max enabled RSAs),
 //            up to 4 ad groups per campaign, never mixing themes. Campaign name "<Theme> | 0001".
 // The result is written to the Output tab for review before "Upload pilot" is ticked.
 import type { Db, ArticleRow } from './db.ts';
 import type { BatchClient, BatchRequest } from './copy.ts';
-import { MODEL, type Wave } from './config.ts';
+import { MODEL, EXCLUDED_URLS, type Wave } from './config.ts';
 import { log } from './log.ts';
 
 export const TAG_MAX_ATTEMPTS = 3;
 export const THEMES_MAX_ATTEMPTS = 3;
 export const ADS_PER_AD_GROUP = 3;
 export const AD_GROUPS_PER_CAMPAIGN = 4;
-export const PILOT_MIN_ARTICLES = 100;
 export const MAX_THEME_LENGTH = 30;
 export const OTHER_THEME = 'Other';
 
@@ -26,6 +26,15 @@ Rules:
 - Group by what the searcher wants: the main dish, ingredient or kitchen task. Articles about the same dish must fit the same theme.
 - Themes must not overlap: every keyword should clearly belong to exactly one theme.
 - Include "${OTHER_THEME}" for keywords that fit nothing else.`;
+
+const EXTRA_THEMES_PROMPT = `You organise a recipe and cooking website's articles into Google Ads campaigns.
+The site already has these themes. You get the keywords that did not fit any of them.
+Return 3 to 12 NEW themes that cover as many of these keywords as possible.
+
+Rules:
+- Each theme: a short, plain name of 1 to 3 words, at most ${MAX_THEME_LENGTH} characters, Title Case (e.g. "Fruit Desserts", "Nuts", "Baking Basics").
+- Do not repeat or rename an existing theme. New themes must not overlap existing ones.
+- Keywords that are not about cooking or food can stay without a theme; do not make a theme just for them.`;
 
 const TAG_PROMPT = `You tag one article of a recipe and cooking website for Google Ads grouping.
 Return:
@@ -46,6 +55,24 @@ export function themesRequest(keywords: string[]): BatchRequest {
         },
       },
       messages: [{ role: 'user', content: `Keywords (one per line):\n${keywords.join('\n')}` }],
+    },
+  };
+}
+
+export function extraThemesRequest(existing: string[], keywords: string[]): BatchRequest {
+  return {
+    custom_id: 'extra',
+    params: {
+      model: MODEL,
+      max_tokens: 2000,
+      system: EXTRA_THEMES_PROMPT,
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: { type: 'object', properties: { themes: { type: 'array', items: { type: 'string' } } }, required: ['themes'], additionalProperties: false },
+        },
+      },
+      messages: [{ role: 'user', content: `Existing themes: ${existing.join(' | ')}\n\nKeywords (one per line):\n${keywords.join('\n')}` }],
     },
   };
 }
@@ -152,6 +179,39 @@ export async function runGrouping(db: Db, client: BatchClient): Promise<boolean>
     }
   }
 
+  // 1b. Extra themes for articles Haiku put in "Other" (one-time re-tag). Existing themes stay as they are.
+  if (db.get('need_extra_themes') === '1') {
+    for (const id of db.openBatches('extra')) {
+      const status = await client.status(id);
+      if (!status.ended) {
+        log(`grouping: extra theme batch ${id} still running`);
+        return false;
+      }
+      let added: string[] = [];
+      for await (const r of client.results(id)) {
+        if (r.type === 'succeeded') {
+          const known = new Set(themes.map((t) => t.toLowerCase()));
+          added = cleanThemes(parseJson(r.text ?? '')?.themes).filter((t) => t !== OTHER_THEME && !known.has(t.toLowerCase()));
+        }
+      }
+      db.closeOtherBatch(id);
+      // "Other" stays last.
+      themes = [...themes.filter((t) => t !== OTHER_THEME), ...added, OTHER_THEME];
+      db.set('themes', JSON.stringify(themes));
+      db.set('need_extra_themes', '0');
+      log(`grouping: ${added.length} extra themes: ${added.join(', ')}`);
+    }
+    if (db.get('need_extra_themes') === '1') {
+      if (db.openBatches('extra').length > 0) return false;
+      const keywords = db.articlesNeedingTag(TAG_MAX_ATTEMPTS).map((a) => a.keyword);
+      const { id } = await client.create([extraThemesRequest(themes, keywords)]);
+      db.addOtherBatch(id, 'extra', 1);
+      db.set('status', `Grouping: asking Haiku for extra themes for ${keywords.length} "Other" articles`);
+      log(`grouping: extra theme batch ${id} sent (${keywords.length} keywords)`);
+      return false;
+    }
+  }
+
   // 2. Tags
   const allowed = new Set(themes);
   for (const id of db.openBatches('tag')) {
@@ -188,7 +248,8 @@ export async function runGrouping(db: Db, client: BatchClient): Promise<boolean>
   if (leftovers > 0) log(`grouping: ${leftovers} articles could not be tagged; put in "${OTHER_THEME}"`);
 
   // 3. Build and save
-  const assignments = buildGrouping(db.allArticles());
+  db.excludeUrls(EXCLUDED_URLS);
+  const assignments = buildGrouping(db.allArticles().filter((a) => (a.wave as string) !== 'excluded'));
   db.saveGrouping(assignments);
   db.set('grouped', '1');
   const campaigns = new Set(assignments.map((a) => a.campaign)).size;
@@ -209,7 +270,6 @@ export function buildGrouping(articles: Pick<ArticleRow, 'url' | 'keyword' | 'th
 
   const out: { url: string; campaign: string; adGroup: string; wave: Wave }[] = [];
   let campaignNumber = 0;
-  let pilotCount = 0;
   for (const theme of themes) {
     // Same dish together: full groups of 3 first, then the remainders, sorted so near dishes sit together.
     const byDish = new Map<string, typeof articles>();
@@ -232,8 +292,8 @@ export function buildGrouping(articles: Pick<ArticleRow, 'url' | 'keyword' | 'th
       const campaign = `${theme} | ${String(campaignNumber).padStart(4, '0')}`;
       const chunk = groups.slice(g, g + AD_GROUPS_PER_CAMPAIGN);
       const count = chunk.reduce((n, x) => n + x.length, 0);
-      const wave: Wave = pilotCount < PILOT_MIN_ARTICLES ? 'pilot' : 'rest';
-      if (wave === 'pilot') pilotCount += count;
+      // Pilot: the first campaign of every theme.
+      const wave: Wave = g === 0 ? 'pilot' : 'rest';
       const used = new Set<string>();
       for (const group of chunk) {
         // Ad group name: the most common dish in the group; unique within the campaign.

@@ -186,6 +186,15 @@ async function main(): Promise<void> {
     db.set('status', 'Grouping: waiting for Haiku\'s tags (the earlier grouping was undone)');
     log(`grouping: undid the "Other" grouping; collecting tag batch ${recovered.join(', ')}`);
   }
+  // One-time (15 Nov 2026): re-tag the "Other" articles with extra themes, then group again (nothing uploaded yet).
+  if (db.get('retag_other_v1') !== 'done') {
+    const reopened = db.reopenOtherForRetag();
+    db.set('retag_other_v1', 'done');
+    if (reopened > 0) {
+      db.set('status', `Grouping: re-tagging ${reopened} "Other" articles with extra themes`);
+      log(`grouping: ${reopened} "Other" articles go back for tagging with extra themes`);
+    }
+  }
   // One-time (14 Nov 2026): tries used up by quota or temporary errors are given back (pending campaigns only).
   if (db.get('reset_temporary_failures_v1') !== 'done') {
     const reset = db.resetTemporaryFailures();

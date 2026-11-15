@@ -63,6 +63,9 @@ export const DEFAULT_DAILY_QUOTA_CAP = 14000; // Basic access is 15,000 a day, s
 export const WAVES = ['pilot', 'rest'] as const;
 export type Wave = (typeof WAVES)[number];
 
+// Articles never uploaded (decided by Siddharth). Kitchen: cannabis butter (Google Ads restricts it).
+export const EXCLUDED_URLS = ['https://ponly.com/kitchen/how-to-make-pot-butter/'];
+
 // Pilot pass rules (same as display)
 export const PILOT_MIN_APPROVED_SHARE = 0.95;
 export const PILOT_BLOCKING_POLICY_WORDS = ['CLICKBAIT', 'MISREPRESENTATION'];
