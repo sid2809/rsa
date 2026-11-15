@@ -175,3 +175,54 @@ test('copy rules drop clickbait wording, keep Best and 2026', () => {
   assert.deepEqual(copy.headlines, ['Best Banana Bread Recipe', 'Banana Bread Recipe 2026']);
   assert.deepEqual(copy.descriptions, ['A plain banana bread recipe with ripe bananas and butter.']);
 });
+
+test('tag batch still running: grouping waits for it, and uses Haiku\'s themes (bug of 15 Nov 2026)', async () => {
+  const { deps, sheet, batches, db } = setup();
+  batches.runningChecks = 2; // every batch shows "running" twice before it ends
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 4; i++) await tick(deps);
+  assert.notEqual(db.get('grouped'), '1', 'not grouped while the tag batch is running');
+  assert.ok(db.allArticles().every((a) => a.theme === null || a.theme === undefined));
+  for (let i = 0; i < 6; i++) await tick(deps);
+  assert.equal(db.get('grouped'), '1');
+  const themes = new Set(db.allArticles().map((a) => a.theme));
+  assert.ok(themes.has('Chicken') && themes.has('Cakes'), JSON.stringify([...themes]));
+  const counts = new Map<string, number>();
+  for (const a of db.allArticles()) counts.set(a.theme!, (counts.get(a.theme!) ?? 0) + 1);
+  // Matches the fake tagger exactly: every article got the theme Haiku gave it.
+  for (const a of db.allArticles()) assert.equal(a.theme, themeFor(a.keyword).theme);
+  assert.ok(db.campaigns().every((c) => c.name.split(' | ')[0] === db.articlesOf(c.name)[0].theme));
+});
+
+test('repair: an "Other" grouping made before the tags came back is undone, and the tags are collected', async () => {
+  const { deps, sheet, batches, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  await tick(deps); // theme batch
+  await tick(deps); // themes in, tag batch sent
+  // Recreate the state of 15 Nov: the tag batch row missing, everything put in Other, grouping saved.
+  const tagBatch = db.allArticles()[0].tag_batch!;
+  db.sql.prepare('DELETE FROM batches WHERE id = ?').run(tagBatch);
+  db.tagLeftoversAsOther();
+  const { buildGrouping } = await import('../src/grouping.ts');
+  db.saveGrouping(buildGrouping(db.allArticles()));
+  db.set('grouped', '1');
+  assert.ok(db.allArticles().every((a) => a.theme === 'Other'));
+
+  assert.deepEqual(db.repairUnrecordedTagBatches(), [tagBatch]);
+  assert.equal(db.campaigns().length, 0);
+  await tick(deps); // collects the tag batch, groups again
+  assert.equal(db.get('grouped'), '1');
+  for (const a of db.allArticles()) assert.equal(a.theme, themeFor(a.keyword).theme);
+  assert.deepEqual(db.repairUnrecordedTagBatches(), [], 'runs once');
+  void batches;
+});
+
+test('repair never touches a grouping that already has campaigns in Google Ads', async () => {
+  const { deps, sheet, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps);
+  const name = db.campaigns()[0].name;
+  db.sql.prepare("UPDATE campaigns SET status = 'uploaded', campaign_id = '1' WHERE name = ?").run(name);
+  db.sql.prepare("UPDATE articles SET tag_batch = 'orphan' WHERE row_index = 0").run();
+  assert.deepEqual(db.repairUnrecordedTagBatches(), []);
+});

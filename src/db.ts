@@ -230,6 +230,36 @@ export class Db {
     return Number(this.sql.prepare("UPDATE articles SET theme = 'Other', dish = keyword WHERE theme IS NULL").run().changes);
   }
 
+  // One-time repair (15 Nov 2026): a tag batch was sent without being recorded, so every article was put in
+  // "Other" while Haiku was still tagging. If nothing of this grouping is in Google Ads yet, undo it and
+  // record the tag batch so its results are collected. Returns the tag batch IDs recovered.
+  repairUnrecordedTagBatches(): string[] {
+    if (this.get('mode') !== 'grouping' || this.get('grouped') !== '1') return [];
+    const used = this.sql.prepare("SELECT COUNT(*) AS n FROM campaigns WHERE status != 'pending' OR campaign_id IS NOT NULL").get() as { n: number };
+    if (used.n > 0) return [];
+    const ids = (
+      this.sql
+        .prepare('SELECT DISTINCT tag_batch AS id FROM articles WHERE tag_batch IS NOT NULL AND tag_batch NOT IN (SELECT id FROM batches)')
+        .all() as { id: string }[]
+    ).map((r) => r.id);
+    if (ids.length === 0) return [];
+    this.sql.exec('BEGIN');
+    try {
+      for (const id of ids) {
+        const count = (this.sql.prepare('SELECT COUNT(*) AS n FROM articles WHERE tag_batch = ?').get(id) as { n: number }).n;
+        this.sql.prepare("INSERT INTO batches (id, created_at, request_count, kind) VALUES (?, ?, ?, 'tag')").run(id, new Date().toISOString(), count);
+      }
+      this.sql.exec("UPDATE articles SET theme = NULL, dish = NULL, campaign = '', ad_group = '', wave = 'rest' WHERE tag_batch IS NOT NULL");
+      this.sql.exec('DELETE FROM campaigns');
+      this.sql.exec("DELETE FROM kv WHERE key = 'grouped'");
+      this.sql.exec('COMMIT');
+    } catch (error) {
+      this.sql.exec('ROLLBACK');
+      throw error;
+    }
+    return ids;
+  }
+
   saveGrouping(assignments: { url: string; campaign: string; adGroup: string; wave: Wave }[]): void {
     this.sql.exec('BEGIN');
     try {

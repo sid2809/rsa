@@ -15,8 +15,13 @@ export class FakeBatches implements BatchClient {
     this.sent.push(requests);
     return { id: `batch_${this.sent.length}` };
   }
-  async status() {
-    return { ended: true, counts: {} };
+  // Number of status checks a batch stays "running" before it ends (0 = ends at the first check).
+  runningChecks = 0;
+  private checks = new Map<string, number>();
+  async status(id: string) {
+    const seen = this.checks.get(id) ?? 0;
+    this.checks.set(id, seen + 1);
+    return { ended: seen >= this.runningChecks, counts: {} };
   }
   async *results(id: string) {
     const requests = this.sent[Number(id.split('_')[1]) - 1];

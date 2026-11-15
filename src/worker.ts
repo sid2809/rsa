@@ -180,6 +180,12 @@ async function main(): Promise<void> {
   const db = new Db(join(dataDir, 'rsa.sqlite'));
   // A failed preflight is tried again after a restart.
   if (db.get('preflight') === 'failed') db.set('preflight', '');
+  // One-time (15 Nov 2026): undo a grouping made before Haiku's tags came back, if nothing was uploaded.
+  const recovered = db.repairUnrecordedTagBatches();
+  if (recovered.length > 0) {
+    db.set('status', 'Grouping: waiting for Haiku\'s tags (the earlier grouping was undone)');
+    log(`grouping: undid the "Other" grouping; collecting tag batch ${recovered.join(', ')}`);
+  }
   // One-time (14 Nov 2026): tries used up by quota or temporary errors are given back (pending campaigns only).
   if (db.get('reset_temporary_failures_v1') !== 'done') {
     const reset = db.resetTemporaryFailures();

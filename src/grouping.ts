@@ -178,6 +178,7 @@ export async function runGrouping(db: Db, client: BatchClient): Promise<boolean>
   const todo = db.articlesNeedingTag(TAG_MAX_ATTEMPTS);
   if (todo.length > 0) {
     const { id } = await client.create(todo.map((a) => tagRequest(a, themes!)));
+    db.addOtherBatch(id, 'tag', todo.length);
     db.markTagBatch(id, todo.map((a) => a.url));
     db.set('status', `Grouping: Haiku is tagging ${todo.length} articles`);
     log(`grouping: tag batch ${id} sent with ${todo.length} articles`);
