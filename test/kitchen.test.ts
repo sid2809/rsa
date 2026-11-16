@@ -289,3 +289,74 @@ test('"Other" re-tag never runs once something is in Google Ads', async () => {
   assert.equal(db.reopenOtherForRetag(), 0);
   assert.equal(db.get('grouped'), '1');
 });
+
+test('copy schema and prompt ask for descriptions before headlines', async () => {
+  const { AD_COPY_SCHEMA, SYSTEM_PROMPT } = await import('../src/adcopy.ts');
+  assert.deepEqual(Object.keys(AD_COPY_SCHEMA.properties), ['descriptions', 'headlines']);
+  assert.ok(SYSTEM_PROMPT.indexOf('descriptions, each') < SYSTEM_PROMPT.indexOf('headlines, each'));
+});
+
+test('cut-off answer: complete lines are kept, the half-written last one is dropped', async () => {
+  const { salvageAdCopy, parseAdCopy } = await import('../src/adcopy.ts');
+  // Like the Kitchen pilot (15 Nov 2026): headlines run past 15 and the answer stops at max_tokens.
+  const many = Array.from({ length: 40 }, (_, i) => `Headline Number ${i + 1}`);
+  const full = JSON.stringify({ descriptions: D, headlines: many });
+  const cut = full.slice(0, full.indexOf('Headline Number 30') + 8); // stops inside headline 30
+  assert.equal(parseAdCopy(cut), undefined);
+  const copy = salvageAdCopy(cut)!;
+  assert.equal(copy.descriptions.length, 4);
+  assert.equal(copy.headlines.length, 15); // 29 complete, capped at 15
+  assert.deepEqual(copy.headlines, many.slice(0, 15));
+  // Cut off inside the descriptions: the complete descriptions are kept, no headlines yet.
+  const early = JSON.stringify({ descriptions: D, headlines: H });
+  const partial = salvageAdCopy(early.slice(0, early.indexOf('Description number 3') + 5))!;
+  assert.deepEqual(partial.descriptions, D.slice(0, 2));
+  assert.equal(partial.headlines.length, 0);
+  // Escaped quotes inside a line are read correctly.
+  assert.deepEqual(salvageAdCopy('{"descriptions": ["Say \\"hi\\" to it.", "Two."], "headlines": ["A", "B", "C"')!.descriptions, ['Say "hi" to it.', 'Two.']);
+  assert.equal(salvageAdCopy('nothing here'), undefined);
+});
+
+test('cut-off answers become ads on the first try (no retry batch)', async () => {
+  const { deps, sheet, batches, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps); // grouping
+  const many = Array.from({ length: 40 }, (_, i) => `Headline Number ${i + 1}`);
+  const full = JSON.stringify({ descriptions: D, headlines: many });
+  batches.answer = (req) => ({ custom_id: req.custom_id, type: 'succeeded', text: full.slice(0, full.indexOf('Headline Number 30') + 8), stopReason: 'max_tokens' });
+  sheet.setting('Upload pilot', 'TRUE');
+  await tick(deps); // copy batch
+  await tick(deps); // copy in, upload
+  assert.equal(batches.sent.length, 3); // themes, tags, one copy batch: no retries
+  const pilot = db.allArticles().filter((a) => a.wave === 'pilot');
+  assert.ok(pilot.every((a) => a.copy_status === 'done' && a.ad_status === 'uploaded'));
+});
+
+test('one-time reset: cut-off copy gets new tries and the ad goes into its existing campaign', async () => {
+  const { deps, sheet, batches, ads, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps); // grouping
+  // Before the fix: one article's answer is cut off with nothing usable, every time.
+  let victim = -1;
+  batches.answer = (req) => {
+    const idx = Number(req.custom_id.slice(1));
+    if (victim < 0) victim = idx;
+    if (idx === victim) return { custom_id: req.custom_id, type: 'succeeded', text: '{"descriptions": ["Half a descr', stopReason: 'max_tokens' };
+    return { custom_id: req.custom_id, type: 'succeeded', text: JSON.stringify({ descriptions: D, headlines: H }) };
+  };
+  sheet.setting('Upload pilot', 'TRUE');
+  for (let i = 0; i < 6; i++) await tick(deps);
+  const skipped = db.allArticles().filter((a) => a.ad_status === 'skipped' && a.wave === 'pilot');
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].copy_error ?? '', /stop_reason max_tokens/);
+  const campaignsBefore = ads.created.size;
+
+  assert.equal(db.resetCutOffCopy(), 1);
+  assert.equal(db.resetCutOffCopy(), 0);
+  batches.answer = (req) => ({ custom_id: req.custom_id, type: 'succeeded', text: JSON.stringify({ descriptions: D, headlines: H }) });
+  for (let i = 0; i < 3; i++) await tick(deps);
+  const after = db.article(skipped[0].url)!;
+  assert.equal(after.ad_status, 'uploaded');
+  assert.ok(after.ad_id);
+  assert.equal(ads.created.size, campaignsBefore); // added to the existing campaign, none created
+});

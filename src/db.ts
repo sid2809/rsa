@@ -417,6 +417,19 @@ export class Db {
     return Number(result.changes);
   }
 
+  // One-time (16 Nov 2026): articles whose copy failed because Haiku's answer was cut off
+  // (stop_reason max_tokens) and that have no ad get 3 new tries. Returns how many were reset.
+  resetCutOffCopy(): number {
+    const result = this.sql
+      .prepare(
+        `UPDATE articles SET copy_status = 'pending', copy_attempts = 0, batch_id = NULL, copy_error = NULL
+         WHERE copy_status = 'failed' AND copy_error LIKE '%stop_reason max_tokens%'
+         AND ad_status != 'uploaded' AND wave != 'excluded'`,
+      )
+      .run();
+    return Number(result.changes);
+  }
+
   // Uploaded campaigns that have articles with copy now but no ad yet (their copy came after the upload).
   campaignsToTopUp(wave: Wave): CampaignRow[] {
     return this.sql

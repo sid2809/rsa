@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Db } from './db.ts';
-import { SYSTEM_PROMPT, AD_COPY_SCHEMA, userMessage, parseAdCopy } from './adcopy.ts';
+import { SYSTEM_PROMPT, AD_COPY_SCHEMA, userMessage, parseAdCopy, salvageAdCopy } from './adcopy.ts';
 import { MODEL, COPY_MAX_ATTEMPTS, COPY_MAX_TOKENS, type Wave } from './config.ts';
 import { log } from './log.ts';
 
@@ -88,6 +88,7 @@ export async function collectCopyBatches(db: Db, client: BatchClient): Promise<v
     let ok = 0;
     let retry = 0;
     let bad = 0;
+    let salvaged = 0;
     for await (const result of client.results(id)) {
       const index = Number(result.custom_id.slice(1));
       const article = db.articleByIndex(index);
@@ -102,17 +103,21 @@ export async function collectCopyBatches(db: Db, client: BatchClient): Promise<v
         retry++;
         continue;
       }
-      const copy = parseAdCopy(result.text ?? '');
+      const parsed = parseAdCopy(result.text ?? '');
+      // A cut-off answer isn't valid JSON; keep the complete lines it has.
+      const rescued = parsed ? undefined : salvageAdCopy(result.text ?? '');
+      const copy = parsed ?? rescued;
       // When an answer can't be used, keep why and how it started, so the Output tab shows what Haiku returned.
       const snippet = (result.text ?? '').replace(/\s+/g, ' ').slice(0, 150);
       const error = copy
-        ? `only ${copy.headlines.length} headlines / ${copy.descriptions.length} descriptions passed the checks`
+        ? `only ${copy.headlines.length} headlines / ${copy.descriptions.length} descriptions passed the checks${rescued ? ` (answer cut off, stop_reason ${result.stopReason ?? 'unknown'})` : ''}`
         : `answer was not valid JSON (stop_reason ${result.stopReason ?? 'unknown'}): ${snippet}`;
-      if (!copy) bad++;
+      if (!parsed) bad++;
+      if (rescued) salvaged++;
       db.recordCopy(article.url, copy, error, COPY_MAX_ATTEMPTS);
       ok++;
     }
     db.closeBatch(id);
-    log(`ad copy: batch ${id} ended: ${ok} answers (${bad} not readable as JSON), ${retry} errors`);
+    log(`ad copy: batch ${id} ended: ${ok} answers (${bad} not readable as JSON, lines kept from ${salvaged} of them), ${retry} errors`);
   }
 }

@@ -8,7 +8,7 @@ import { anthropicBatchClient, submitCopyBatch, collectCopyBatches, type BatchCl
 import { googleAdsPort, AdsError, isQuotaError, type AdsPort } from './ads.ts';
 import { ensureLabel, preflight, existingCampaigns, uploadCampaign, topUpCampaign, enableWave, sync, QuotaReached, googleQuotaExhausted } from './upload.ts';
 import { writeReports } from './report.ts';
-import { WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
+import { LABEL_NAME, WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
 
 const REQUIRED_ENV = [
   'SHEET_ID',
@@ -206,6 +206,15 @@ async function main(): Promise<void> {
     const reset = db.resetUnreadableCopy();
     db.set('reset_unreadable_copy_v1', 'done');
     log(`ad copy: ${reset} articles whose answers couldn't be read get 3 new tries`);
+  }
+  // One-time (16 Nov 2026), Kitchen service only: copy cut off by the token limit gets 3 new tries;
+  // the ads then go into their existing campaigns (top-up). Faith is left as it is.
+  if (db.get('reset_cutoff_copy_v1') !== 'done') {
+    if (LABEL_NAME === 'Ponly Kitchen') {
+      const reset = db.resetCutOffCopy();
+      log(`ad copy: ${reset} articles whose answers were cut off get 3 new tries`);
+    }
+    db.set('reset_cutoff_copy_v1', 'done');
   }
   const sheet = googleSheet(env.SHEET_ID, env.GOOGLE_SERVICE_ACCOUNT_JSON);
   await sheet.ensureTabs();

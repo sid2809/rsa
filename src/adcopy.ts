@@ -16,8 +16,9 @@ export interface AdCopy {
 export const SYSTEM_PROMPT = `You write Google Ads responsive search ad copy for article pages.
 
 Rules:
-- Exactly ${HEADLINES_WANTED} headlines, each at most ${MAX_HEADLINE_LENGTH} characters including spaces. Count carefully.
+- Write the descriptions first, then the headlines.
 - Exactly ${DESCRIPTIONS_WANTED} descriptions, each at most ${MAX_DESCRIPTION_LENGTH} characters including spaces.
+- Exactly ${HEADLINES_WANTED} headlines, each at most ${MAX_HEADLINE_LENGTH} characters including spaces. Count carefully. Stop after headline ${HEADLINES_WANTED}.
 - Every headline must be different in wording and angle; Google mixes them in any order, so each must make sense on its own.
 - Put the search keyword (or a natural close variant) in at least 3 headlines when it fits the length limit.
 - Describe what the reader gets from the article. Do not promise anything the article title doesn't support.
@@ -28,11 +29,12 @@ Rules:
 
 export const AD_COPY_SCHEMA = {
   type: 'object',
+  // Descriptions first: if an answer runs long and is cut off, the descriptions are already written.
   properties: {
-    headlines: { type: 'array', items: { type: 'string' } },
     descriptions: { type: 'array', items: { type: 'string' } },
+    headlines: { type: 'array', items: { type: 'string' } },
   },
-  required: ['headlines', 'descriptions'],
+  required: ['descriptions', 'headlines'],
   additionalProperties: false,
 };
 
@@ -95,4 +97,33 @@ export function parseAdCopy(text: string): AdCopy | undefined {
     }
   }
   return undefined;
+}
+
+// For an answer that was cut off (not valid JSON): keeps every complete string in the
+// "descriptions" and "headlines" lists. Returns undefined if neither list has any.
+export function salvageAdCopy(text: string): AdCopy | undefined {
+  const descriptions = completeStrings(text, 'descriptions');
+  const headlines = completeStrings(text, 'headlines');
+  if (descriptions.length === 0 && headlines.length === 0) return undefined;
+  return cleanAdCopy({ headlines, descriptions });
+}
+
+function completeStrings(text: string, key: string): string[] {
+  const start = text.search(new RegExp(`"${key}"\\s*:\\s*\\[`));
+  if (start < 0) return [];
+  const result: string[] = [];
+  let i = text.indexOf('[', start) + 1;
+  const literal = /\s*,?\s*("(?:[^"\\]|\\.)*")/y;
+  while (i < text.length) {
+    literal.lastIndex = i;
+    const match = literal.exec(text);
+    if (!match) break; // end of the list, or a string cut off before its closing quote
+    try {
+      result.push(JSON.parse(match[1]) as string);
+    } catch {
+      break;
+    }
+    i = literal.lastIndex;
+  }
+  return result;
 }
