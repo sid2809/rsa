@@ -8,7 +8,7 @@ import { campaignOperations, AdsError, type AdsPort, type Operation } from '../s
 import { parseInput, parseSettings, SETTINGS_DEFAULTS, type SheetPort } from '../src/sheet.ts';
 import { H, D, FakeBatches, FakeAds, FakeSheet } from './fakes.ts';
 import { tick, type Deps } from '../src/worker.ts';
-import { outputRows, summaryRows } from '../src/report.ts';
+import { outputRows, summaryRows, writeReports } from '../src/report.ts';
 import { buildInput, campaignTheme } from '../scripts/group.ts';
 import { FINAL_URL_SUFFIX, MODEL } from '../src/config.ts';
 
@@ -300,4 +300,47 @@ test('unreadable copy: retried after the fix and added to the already-uploaded c
   const perGroup = new Map<string, number>();
   for (const c of ads.children.filter((x) => x.entity === 'ad_group_ad')) perGroup.set(c.adGroup, (perGroup.get(c.adGroup) ?? 0) + 1);
   assert.ok([...perGroup.values()].every((n) => n <= 3), JSON.stringify([...perGroup.entries()]));
+});
+
+test('reports: Output and Campaign map are sent to the Sheet only when they changed', async () => {
+  const { db, sheet, deps } = setup();
+  await tick(deps); // imports the Input tab
+  const writes: string[] = [];
+  let failOutput = false;
+  const counting: SheetPort = {
+    ensureTabs: () => sheet.ensureTabs(),
+    read: (tab) => sheet.read(tab),
+    write: async (tab, rows) => {
+      if (failOutput && tab === 'Output') throw new Error('Sheets is down');
+      writes.push(tab);
+      await sheet.write(tab, rows);
+    },
+  };
+  const count = (tab: string) => writes.filter((t) => t === tab).length;
+
+  await writeReports(db, counting);
+  assert.deepEqual([count('Summary'), count('Output'), count('Campaign map')], [1, 1, 1]);
+  assert.deepEqual(sheet.tabs.get('Output'), outputRows(db).map((r) => r.map(String)));
+
+  // Nothing changed: only the small Summary tab (with its time) is written again.
+  await writeReports(db, counting);
+  await writeReports(db, counting);
+  assert.deepEqual([count('Summary'), count('Output'), count('Campaign map')], [3, 1, 1]);
+
+  // An article changes: Output is written again, with the new value.
+  const first = db.allArticles()[0];
+  db.recordCopy(first.url, { headlines: H, descriptions: D }, null, 3);
+  await writeReports(db, counting);
+  assert.deepEqual([count('Output'), count('Campaign map')], [2, 1]);
+  assert.deepEqual(sheet.tabs.get('Output'), outputRows(db).map((r) => r.map(String)));
+
+  // A write that fails is sent again the next time, even though the rows are the same as the failed attempt.
+  const second = db.allArticles()[1];
+  db.recordCopy(second.url, { headlines: H, descriptions: D }, null, 3);
+  failOutput = true;
+  await assert.rejects(writeReports(db, counting));
+  failOutput = false;
+  await writeReports(db, counting);
+  assert.equal(count('Output'), 3);
+  assert.deepEqual(sheet.tabs.get('Output'), outputRows(db).map((r) => r.map(String)));
 });

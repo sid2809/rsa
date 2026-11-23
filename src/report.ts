@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Db } from './db.ts';
 import type { SheetPort } from './sheet.ts';
 import { pilotResult } from './upload.ts';
@@ -62,12 +63,29 @@ export function summaryRows(db: Db): (string | number)[][] {
   return rows;
 }
 
+// What was last written to each tab (a hash of its rows), per Sheet. Kept in memory only: after a restart
+// every tab is written once more.
+const lastWritten = new WeakMap<SheetPort, Map<string, string>>();
+
+// Writes a tab only when its rows differ from the last write. The Output tab is one row per article with all
+// its ad copy (megabytes on a big list); sending it again every 2 minutes with nothing changed was almost all
+// of the service's network egress on Railway.
+async function writeIfChanged(sheet: SheetPort, tab: string, rows: (string | number)[][]): Promise<void> {
+  let written = lastWritten.get(sheet);
+  if (!written) lastWritten.set(sheet, (written = new Map()));
+  const hash = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+  if (written.get(tab) === hash) return;
+  await sheet.write(tab, rows);
+  written.set(tab, hash); // only after the write worked, so a failed write is sent again next time
+}
+
 export async function writeReports(db: Db, sheet: SheetPort): Promise<void> {
   if (db.articleCount() === 0) {
     await sheet.write('Summary', [['Item', 'Value'], ['Updated', new Date().toISOString()], ['Status', db.get('status') ?? 'waiting for Input']]);
     return;
   }
+  // Summary is small and carries the "Updated" time, so it is always written: it shows the worker is alive.
   await sheet.write('Summary', summaryRows(db));
-  await sheet.write('Output', outputRows(db));
-  await sheet.write('Campaign map', campaignMapRows(db));
+  await writeIfChanged(sheet, 'Output', outputRows(db));
+  await writeIfChanged(sheet, 'Campaign map', campaignMapRows(db));
 }
