@@ -208,6 +208,14 @@ async function adoptCampaign(db: Db, ads: AdsPort, cap: number, name: string, ca
   }
   const articles = db.articlesOf(name);
   const found = articles.filter((a) => byUrl.has(a.url)).map((a) => ({ url: a.url, ...byUrl.get(a.url)! }));
+  // A campaign with this name that has ads, none of them for this campaign's articles, belongs to another
+  // list (same label, same name). It is not taken over, and nothing is created under its name.
+  if (rows.length > 0 && found.length === 0) {
+    const error = `a campaign named "${name}" already exists in the account (id ${campaignId}) with other articles; this list needs its own campaign names (CAMPAIGN_NAME_TAG)`;
+    db.markCampaignAttemptFailed(name, error, 1);
+    log(`upload: ${error}`);
+    return;
+  }
   const missing = articles.filter((a) => !byUrl.has(a.url)).map((a) => ({ url: a.url, status: 'error' as const, error: 'not found in the existing campaign in Google Ads' }));
   db.markCampaignUploaded(name, campaignId, found, missing);
   log(`upload: "${name}" already existed in Google Ads (id ${campaignId}); recorded ${found.length} ads, ${missing.length} not found`);

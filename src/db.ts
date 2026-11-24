@@ -266,6 +266,14 @@ export class Db {
     return used.n === 0;
   }
 
+  // During grouping (before anything is built): the "Other" articles go back for tagging with extra themes.
+  // Returns how many.
+  reopenOtherForExtraThemes(): number {
+    const n = Number(this.sql.prepare("UPDATE articles SET theme = NULL, dish = NULL, tag_attempts = 0, tag_batch = NULL WHERE theme = 'Other'").run().changes);
+    if (n > 0) this.set('need_extra_themes', '1');
+    return n;
+  }
+
   // One-time (15 Nov 2026): re-tag the "Other" articles with extra themes Haiku will propose, then group again.
   // Only while nothing of the grouping is in Google Ads. Returns how many articles go back for tagging.
   reopenOtherForRetag(): number {

@@ -100,3 +100,13 @@ npm run typecheck
 ```
 
 Node 22 runs the TypeScript directly (no build step).
+
+## A second list under a label that is already in the account
+
+The service finds its campaigns by label and name, so a second list with the same label needs its own names.
+Give the new service `CAMPAIGN_NAME_TAG` (e.g. `T1`): campaigns are then named `Chicken | T1 0001`.
+Without it, a campaign name that already exists with other articles is not taken over and not created; it is
+reported as failed. Each list still needs its own service, Sheet and empty volume.
+
+For every new plain list, the articles Haiku puts in "Other" are tagged once more with extra themes before the
+grouping is built.

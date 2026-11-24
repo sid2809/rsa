@@ -38,12 +38,15 @@ function kitchenBatches(): FakeBatches {
   return batches;
 }
 
-function setup(rows = 400) {
+// `extraRound: false` (the default here) starts with the automatic extra-themes round already marked done,
+// as on the first Kitchen service, so these tests exercise one thing at a time. The round has its own tests.
+function setup(rows = 400, extraRound = false) {
   const csv = readFileSync(new URL('./fixtures/kitchen.csv', import.meta.url), 'utf8').trim().split(/\r?\n/).slice(0, rows + 1);
   const sheet = new FakeSheet();
   sheet.tabs.set('Input', csv.map((line) => line.split(',')));
   sheet.tabs.set('Settings', [['Setting', 'Value', ''], ...SETTINGS_DEFAULTS.map((r) => [...r])]);
   const db = new Db(':memory:');
+  if (!extraRound) db.set('extra_themes_round', 'done');
   const batches = kitchenBatches();
   const ads = new FakeAds();
   return { db, sheet, batches, ads, deps: { db, sheet, batches, adsFor: () => ads } };
@@ -359,4 +362,70 @@ test('one-time reset: cut-off copy gets new tries and the ad goes into its exist
   assert.equal(after.ad_status, 'uploaded');
   assert.ok(after.ad_id);
   assert.equal(ads.created.size, campaignsBefore); // added to the existing campaign, none created
+});
+
+test('a new list gets the extra-themes round by itself: "Other" is re-tagged once before anything is built', async () => {
+  const { deps, sheet, batches, db } = setup(400, true);
+  sheet.setting('Account', '197-000-0000');
+  const original = batches.answer;
+  let extraRequests = 0;
+  let offered = false;
+  batches.answer = (req) => {
+    if (req.custom_id === 'extra') {
+      extraRequests++;
+      return { custom_id: 'extra', type: 'succeeded', text: JSON.stringify({ themes: ['Quick Bites'] }) };
+    }
+    if (req.custom_id.startsWith('t')) {
+      const content = (req.params.messages as { content: string }[])[0].content;
+      if (/Quick Bites/.test(content)) {
+        offered = true;
+        return { custom_id: req.custom_id, type: 'succeeded', text: JSON.stringify({ theme: 'Quick Bites', dish: 'bites' }) };
+      }
+    }
+    return original(req);
+  };
+  for (let i = 0; i < 3; i++) await tick(deps); // themes, tags, tags in -> "Other" goes back
+  assert.notEqual(db.get('grouped'), '1', 'nothing is built before the extra round');
+  assert.equal(db.campaigns().length, 0);
+  assert.match(db.get('status') ?? '', /re-tagging \d+ "Other" articles with extra themes/);
+  for (let i = 0; i < 3; i++) await tick(deps); // extra themes, tags again, grouping
+  assert.equal(db.get('grouped'), '1');
+  assert.equal(extraRequests, 1, 'one extra-themes request, once');
+  assert.ok(offered);
+  assert.equal(db.allArticles().filter((a) => a.theme === 'Other').length, 0);
+  assert.ok(db.campaigns().some((c) => c.name.startsWith('Quick Bites | ')));
+  assert.deepEqual(JSON.parse(db.get('themes')!).slice(-2), ['Quick Bites', 'Other']);
+  // Articles outside "Other" kept their themes.
+  for (const a of db.allArticles().filter((x) => x.theme !== 'Quick Bites')) assert.equal(a.theme, themeFor(a.keyword).theme);
+  for (let i = 0; i < 3; i++) await tick(deps);
+  assert.equal(extraRequests, 1);
+});
+
+test('campaign name tag: "Chicken | T1 0001" with a tag, "Chicken | 0001" without', () => {
+  const articles = Array.from({ length: 14 }, (_, i) => ({ url: `https://x/${i}`, keyword: `k${i}`, theme: 'Chicken', dish: 'chicken' }));
+  assert.deepEqual([...new Set(buildGrouping(articles, 'T1').map((a) => a.campaign))], ['Chicken | T1 0001', 'Chicken | T1 0002']);
+  assert.deepEqual([...new Set(buildGrouping(articles, '').map((a) => a.campaign))], ['Chicken | 0001', 'Chicken | 0002']);
+  assert.deepEqual([...new Set(buildGrouping(articles).map((a) => a.campaign))], ['Chicken | 0001', 'Chicken | 0002'], 'no tag set: names as before');
+});
+
+test('second list under the same label: another list\'s campaign with the same name is not taken over and nothing is created under its name', async () => {
+  const { deps, sheet, ads, db } = setup();
+  sheet.setting('Account', '197-000-0000');
+  for (let i = 0; i < 3; i++) await tick(deps);
+  const names = db.campaigns().map((c) => c.name);
+  // The account already has the first Kitchen list: same label, a campaign with the same name, other articles.
+  ads.existing = [{ id: '555', name: names[0] }, { id: '556', name: 'Soups | 0200' }];
+  ads.existingAds.set('555', ['https://ponly.com/kitchen/an-article-of-the-first-list/']);
+  sheet.setting('Upload pilot', 'TRUE');
+  sheet.setting('Upload rest', 'TRUE');
+  for (let i = 0; i < 6; i++) await tick(deps);
+  const clash = db.campaigns().find((c) => c.name === names[0])!;
+  assert.equal(clash.status, 'failed');
+  assert.equal(clash.campaign_id, null);
+  assert.match(clash.error ?? '', /already exists in the account \(id 555\) with other articles.*CAMPAIGN_NAME_TAG/);
+  assert.ok(db.articlesOf(names[0]).every((a) => a.ad_status !== 'uploaded' && !a.ad_id));
+  const createdNames = ads.calls.filter((c) => !c.validateOnly).flatMap((c) => c.operations).filter((o) => o.entity === 'campaign' && o.operation === 'create').map((o) => (o.resource as { name: string }).name);
+  assert.ok(!createdNames.includes(names[0]), 'no second campaign under the taken name');
+  // Every other campaign of this list is created as usual.
+  assert.ok(db.campaigns().filter((c) => c.name !== names[0]).every((c) => c.status === 'uploaded'));
 });

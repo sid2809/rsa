@@ -11,6 +11,10 @@ export const LANGUAGE_ID = '1000'; // English
 // Unset = the Faith service, which also finds its campaigns by the name prefix "Ponly Faith |" (as before).
 export const LABEL_NAME = process.env.LABEL_NAME?.trim() || 'Ponly Faith';
 export const FIND_CAMPAIGNS_BY_LABEL = Boolean(process.env.LABEL_NAME?.trim());
+// A second list under a label that is already in the account needs its own campaign names, because the
+// service finds "its" campaigns by label and name. CAMPAIGN_NAME_TAG=T1 gives "Chicken | T1 0001".
+// Unset = names as before ("Chicken | 0001").
+export const CAMPAIGN_NAME_TAG = process.env.CAMPAIGN_NAME_TAG?.trim() ?? '';
 // Display's "enhancements off": Google's automatically created text assets switched off.
 export const TEXT_ASSET_AUTOMATION_OFF = true;
 

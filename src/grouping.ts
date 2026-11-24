@@ -8,7 +8,7 @@
 // The result is written to the Output tab for review before "Upload pilot" is ticked.
 import type { Db, ArticleRow } from './db.ts';
 import type { BatchClient, BatchRequest } from './copy.ts';
-import { MODEL, EXCLUDED_URLS, type Wave } from './config.ts';
+import { MODEL, EXCLUDED_URLS, CAMPAIGN_NAME_TAG, type Wave } from './config.ts';
 import { log } from './log.ts';
 
 export const TAG_MAX_ATTEMPTS = 3;
@@ -247,6 +247,18 @@ export async function runGrouping(db: Db, client: BatchClient): Promise<boolean>
   const leftovers = db.tagLeftoversAsOther();
   if (leftovers > 0) log(`grouping: ${leftovers} articles could not be tagged; put in "${OTHER_THEME}"`);
 
+  // 2b. Once per list: the articles in "Other" are tagged again with extra themes Haiku proposes for them
+  //     (what was done by hand for the first Kitchen list on 15 Nov 2026).
+  if (db.get('extra_themes_round') !== 'done') {
+    db.set('extra_themes_round', 'done');
+    const reopened = db.reopenOtherForExtraThemes();
+    if (reopened > 0) {
+      db.set('status', `Grouping: re-tagging ${reopened} "Other" articles with extra themes`);
+      log(`grouping: ${reopened} "Other" articles go back for tagging with extra themes`);
+      return false;
+    }
+  }
+
   // 3. Build and save
   db.excludeUrls(EXCLUDED_URLS);
   const assignments = buildGrouping(db.allArticles().filter((a) => (a.wave as string) !== 'excluded'));
@@ -260,7 +272,10 @@ export async function runGrouping(db: Db, client: BatchClient): Promise<boolean>
 }
 
 // Builds ad groups and campaigns from tagged articles. Pure; exported for tests.
-export function buildGrouping(articles: Pick<ArticleRow, 'url' | 'keyword' | 'theme' | 'dish'>[]): { url: string; campaign: string; adGroup: string; wave: Wave }[] {
+export function buildGrouping(
+  articles: Pick<ArticleRow, 'url' | 'keyword' | 'theme' | 'dish'>[],
+  nameTag: string = CAMPAIGN_NAME_TAG,
+): { url: string; campaign: string; adGroup: string; wave: Wave }[] {
   const byTheme = new Map<string, typeof articles>();
   for (const a of articles) {
     const theme = a.theme || OTHER_THEME;
@@ -289,7 +304,8 @@ export function buildGrouping(articles: Pick<ArticleRow, 'url' | 'keyword' | 'th
 
     for (let g = 0; g < groups.length; g += AD_GROUPS_PER_CAMPAIGN) {
       campaignNumber++;
-      const campaign = `${theme} | ${String(campaignNumber).padStart(4, '0')}`;
+      const number = String(campaignNumber).padStart(4, '0');
+      const campaign = nameTag ? `${theme} | ${nameTag} ${number}` : `${theme} | ${number}`;
       const chunk = groups.slice(g, g + AD_GROUPS_PER_CAMPAIGN);
       const count = chunk.reduce((n, x) => n + x.length, 0);
       // Pilot: the first campaign of every theme.

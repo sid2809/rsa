@@ -38,6 +38,7 @@ export class FakeAds implements AdsPort {
   currency = 'INR';
   next = 100;
   created = new Map<string, Record<string, any>>(); // campaign resource name -> resource
+  existingAds = new Map<string, string[]>(); // campaign id -> final URLs of the ads already in it
   adGroups: { id: string; name: string; campaign: string }[] = [];
   children: { entity: string; adGroup: string }[] = [];
   async mutate(operations: Operation[], options?: { validateOnly?: boolean }) {
@@ -89,6 +90,10 @@ export class FakeAds implements AdsPort {
       return [{ campaign: { ...c, status: 3, advertising_channel_type: 2, geo_target_type_setting: { positive_geo_target_type: 7 } }, campaign_budget: { amount_micros: 2_700_000_000 } }];
     }
     if ((gaql.includes('campaign.name LIKE') || gaql.includes('campaign.labels CONTAINS ANY')) && gaql.startsWith('SELECT campaign.id, campaign.name')) return this.existing.map((c) => ({ campaign: c }));
+    if (gaql.includes('ad_group_ad.ad.final_urls')) {
+      const campaignId = gaql.match(/campaign\.id = (\d+)/)![1];
+      return (this.existingAds.get(campaignId) ?? []).map((url, i) => ({ ad_group: { id: `9${i}` }, ad_group_ad: { ad: { id: `8${i}`, final_urls: [url] } } }));
+    }
     if (gaql.includes('FROM ad_group_ad WHERE campaign.id')) return [];
     if (gaql.includes('FROM ad_group WHERE campaign.id')) {
       const campaignId = gaql.match(/campaign\.id = (\d+)/)![1];
