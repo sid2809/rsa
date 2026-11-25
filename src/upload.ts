@@ -150,7 +150,7 @@ export async function preflight(db: Db, ads: AdsPort, customerId: string, cap: n
     expect(criteria.some((r) => String(r.campaign_criterion?.location?.geo_target_constant ?? '').endsWith(`/${LOCATION_ID}`)), 'US location missing');
     expect(criteria.some((r) => String(r.campaign_criterion?.language?.language_constant ?? '').endsWith(`/${LANGUAGE_ID}`)), 'English missing');
     if (problems.length > 0) throw new Error(`test campaign settings are wrong: ${problems.join('; ')}`);
-    notes.push('test campaign read back: paused, Search only, Max Clicks ₹3 cap, ₹2,700 budget, US presence, English, label, tracking suffix: all correct');
+    notes.push(`test campaign read back: paused, Search only, Max Clicks ₹${MAX_CPC_INR} cap, ₹2,700 budget, US presence, English, label, tracking suffix: all correct`);
   } finally {
     spend(db, cap, 2, 'preflight cleanup');
     await ads.mutate([

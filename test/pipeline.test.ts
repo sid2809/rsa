@@ -67,7 +67,7 @@ test('campaign operations: settings Siddharth decided', () => {
   assert.equal(budget.amount_micros, 2_700_000_000);
   assert.equal(campaign.status, 3); // PAUSED
   assert.equal(campaign.advertising_channel_type, 2); // SEARCH
-  assert.equal(campaign.target_spend.cpc_bid_ceiling_micros, 3_000_000);
+  assert.equal(campaign.target_spend.cpc_bid_ceiling_micros, 4_000_000);
   assert.deepEqual(campaign.network_settings, { target_google_search: true, target_search_network: false, target_partner_search_network: false, target_content_network: false });
   assert.equal(campaign.geo_target_type_setting.positive_geo_target_type, 7); // PRESENCE
   assert.equal(campaign.final_url_suffix, FINAL_URL_SUFFIX);

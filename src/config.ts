@@ -3,7 +3,7 @@
 
 // Campaign
 export const CAMPAIGN_BUDGET_INR = 2700; // per campaign, per day
-export const MAX_CPC_INR = 3; // Maximize clicks, CPC capped at this
+export const MAX_CPC_INR = 4; // Maximize clicks, CPC capped at this. Applies to campaigns created from now on; existing ones keep their cap
 export const LOCATION_ID = '2840'; // United States
 export const LOCATION_TARGETING = 'PRESENCE' as const; // people in the US, not people interested in the US
 export const LANGUAGE_ID = '1000'; // English
