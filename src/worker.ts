@@ -8,7 +8,7 @@ import { anthropicBatchClient, submitCopyBatch, collectCopyBatches, type BatchCl
 import { googleAdsPort, AdsError, isQuotaError, type AdsPort } from './ads.ts';
 import { ensureLabel, preflight, existingCampaigns, uploadCampaign, topUpCampaign, enableWave, sync, QuotaReached, googleQuotaExhausted } from './upload.ts';
 import { writeReports } from './report.ts';
-import { LABEL_NAME, WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
+import { LABEL_NAME, MAX_CPC_INR, WAVES, TICK_SECONDS, SYNC_EVERY_HOURS, SHEET_WRITE_MIN_SECONDS, UPLOAD_MAX_ATTEMPTS, DEFAULT_DAILY_QUOTA_CAP, type Wave } from './config.ts';
 
 const REQUIRED_ENV = [
   'SHEET_ID',
@@ -240,7 +240,7 @@ async function main(): Promise<void> {
       return port;
     },
   };
-  log('rsa worker started');
+  log(`rsa worker started (label "${LABEL_NAME}", max CPC ₹${MAX_CPC_INR} for new campaigns)`);
   let lastWrite = 0;
   for (;;) {
     try {

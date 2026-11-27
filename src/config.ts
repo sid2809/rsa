@@ -3,7 +3,20 @@
 
 // Campaign
 export const CAMPAIGN_BUDGET_INR = 2700; // per campaign, per day
-export const MAX_CPC_INR = 4; // Maximize clicks, CPC capped at this. Applies to campaigns created from now on; existing ones keep their cap
+// Maximize clicks, CPC capped at this many rupees. Used only when a campaign is created; existing campaigns keep their cap.
+// Default 4. A service can set its own cap with the Railway variable MAX_CPC_INR (e.g. 5 for the Fampy Eats Tier 2 list).
+export const DEFAULT_MAX_CPC_INR = 4;
+export function maxCpcInr(raw: string | undefined): number {
+  const text = raw?.trim();
+  if (!text) return DEFAULT_MAX_CPC_INR;
+  const value = Number(text);
+  // Whole paise only: Google rejects bids that are not a multiple of the currency's smallest unit.
+  if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(Math.round(value * 1e6) / 1e4)) {
+    throw new Error(`MAX_CPC_INR must be a positive amount in rupees with at most 2 decimals (e.g. 5 or 4.5), got "${text}"`);
+  }
+  return value;
+}
+export const MAX_CPC_INR = maxCpcInr(process.env.MAX_CPC_INR);
 export const LOCATION_ID = '2840'; // United States
 export const LOCATION_TARGETING = 'PRESENCE' as const; // people in the US, not people interested in the US
 export const LANGUAGE_ID = '1000'; // English

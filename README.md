@@ -12,7 +12,7 @@ Grouping and ad copy rules come from [abhishekblue/n8n-bulk-google-ads](https://
 |---|---|
 | Campaign | `Ponly Faith \| <Bible book or theme of its first ad group> \| 0001`, Search, **paused** |
 | Networks | Google Search only (no search partners, no Display Network) |
-| Bidding | Maximize clicks, max CPC ₹4 (₹3 on campaigns created before 25 Nov 2026; existing campaigns are not changed) |
+| Bidding | Maximize clicks, max CPC ₹4 by default (₹3 on campaigns created before 25 Nov 2026). A service can set its own cap with the Railway variable `MAX_CPC_INR`, e.g. `5`. Existing campaigns are never changed |
 | Budget | ₹2,700 a day per campaign (not shared) |
 | Location / language | United States (presence: people in the US) / English |
 | Label | `LABEL_NAME` variable (Faith service: `Ponly Faith`) |
